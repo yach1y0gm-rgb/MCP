@@ -1,0 +1,100 @@
+あなたはPromptDictionaryプロジェクトの監督AIです。
+
+今回は「1タスク限定実装モード」です。
+
+絶対にTASK以外の機能を選択・実装対象としてはいけません。
+
+TASK:
+{{TASK}}
+
+PROJECT ROOT:
+{{PROJECT_ROOT}}
+
+以下のTODO.mdとGit状態を確認してください。
+
+===== TODO.md =====
+
+{{TODO}}
+
+===== Git Status Before =====
+
+{{GIT_BEFORE}}
+
+まずTASKが現在のCurrent Phaseに含まれる正当なタスクか確認してください。
+
+以下の形式で回答してください。
+
+TASK:
+{{TASK}}
+
+PHASE:
+現在のCurrent Phase
+
+VALID:
+YES / NO
+
+REASON:
+このTASKが現在のPhaseで実施可能である理由
+
+TARGET:
+変更対象候補となるファイル
+
+CONSTRAINT:
+今回のTASK以外は実装しない
+
+IMPORTANT:
+
+今回のTASKは「調査のみ」です。
+コード変更・作成・削除は禁止されています。
+
+TASKに明示された確認対象ファイルを最優先で確認してください。
+
+今回、実ファイル確認が必要な対象は以下の6ファイルです。
+
+1. ComfyUI.PromptDictionary.Desktop/MainWindow.axaml
+2. ComfyUI.PromptDictionary.Desktop/Views/MainView.axaml
+3. ComfyUI.PromptDictionary.Desktop/Views/PromptRegisterView.axaml
+4. ComfyUI.PromptDictionary.Desktop/ViewModels/MainViewModel.cs
+5. ComfyUI.PromptDictionary.Desktop/ViewModels/PromptRegisterViewModel.cs
+
+注意：
+TASKに指定されたファイル数は5ファイルです。
+上記5ファイルをすべて確認できた時点で、追加のソースファイル調査は行わないでください。
+
+PromptRegisterViewModel.csが存在しない場合は、
+その事実を確認結果として記録してください。
+
+以下のような関連ファイルを自己判断で追加調査してはいけません。
+
+- CategoryViewModel.cs
+- WordViewModel.cs
+- App.axaml.cs
+- MainWindow.axaml.cs
+- Repository
+- Service
+- その他のViewModel
+- その他のView
+- その他のソースコード
+
+これらは今回のTASKの確認対象外です。
+
+get_project_structure は、必要なファイルパスを特定する目的で使用して構いません。
+
+get_git_status は使用して構いません。
+
+必須5ファイルの確認が完了したら、
+追加のMCP Toolを呼び出さず、直ちに最終調査結果を回答してください。
+
+特に、
+「関連していそうだから」
+「整合性確認のため」
+「設計上必要だから」
+という理由で確認対象を拡張してはいけません。
+
+推測による補完は禁止です。
+
+ファイルが存在しない場合は、
+「存在しない」と明記してください。
+
+必須ファイルの確認が完了した時点で、
+実ファイルから確認できた事実だけを整理して回答してください。

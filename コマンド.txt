@@ -1,0 +1,2 @@
+node "E:\tools\AI\MCP\gemini-supervisor.js"
+node "E:\tools\AI\MCP\openrouter-supervisor.js"
