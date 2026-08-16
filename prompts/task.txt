@@ -1,3 +1,24 @@
-PromptDictionaryプロジェクトの現在の作業ディレクトリとGit statusを確認してください。
+REVIEW_REQUIRED
 
-今回の作業ではコードを変更しないでください。
+原因:
+- Application.MainWindow は存在しない
+- IClipboard.SetText は存在しない
+- Avalonia 12では SetTextAsync
+
+
+前回の修正はBuildに失敗しました。
+
+監督AIの指摘:
+
+1. Application.MainWindow は存在しない
+2. IClipboard.SetText は存在しない
+3. Avalonia 12では SetTextAsync を使用する必要がある
+4. MainViewModelにもCS8602が5件残っている
+
+上記を確認して修正してください。
+
+勝手に別方式へ変更せず、
+既存のMVVM/DI設計を維持してください。
+
+修正後、必ずdotnet buildを実行してください。
+

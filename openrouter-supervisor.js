@@ -1,9 +1,8 @@
 import https from "https";
 import { spawn } from "node:child_process";
-import { readFile } from "node:fs/promises";
+import { readFile, writeFile, unlink } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { writeFile, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
@@ -33,10 +32,10 @@ const TASK_FILE =
         "task.txt"
     );
 
-const QWEN_CMD = "qwen.cmd";
-
 const MODEL =
     "nvidia/nemotron-3-ultra-550b-a55b:free";
+
+const MAX_ITERATIONS = 5;
 
 const apiKey =
     process.env.OPENROUTER_API_KEY;
@@ -53,18 +52,9 @@ if (!apiKey) {
 // Utility
 // ============================================================
 
-function sleep(ms) {
-    return new Promise(
-        resolve => setTimeout(resolve, ms)
-    );
-}
-
 async function readPromptFile(filePath) {
     try {
-        return await readFile(
-            filePath,
-            "utf8"
-        );
+        return await readFile(filePath, "utf8");
     } catch (error) {
         throw new Error(
             `Prompt file could not be read:\n${filePath}\n${error.message}`
@@ -75,15 +65,11 @@ async function readPromptFile(filePath) {
 function applyTemplate(template, values) {
     let result = template;
 
-    for (
-        const [key, value]
-        of Object.entries(values)
-    ) {
-        result =
-            result.replaceAll(
-                `{{${key}}}`,
-                value ?? ""
-            );
+    for (const [key, value] of Object.entries(values)) {
+        result = result.replaceAll(
+            `{{${key}}}`,
+            value ?? ""
+        );
     }
 
     return result;
@@ -92,26 +78,45 @@ function applyTemplate(template, values) {
 function extractQwenResult(output) {
     try {
         const events = JSON.parse(output);
-        if (!Array.isArray(events)) return output;
 
-        // 1. result イベントを優先
+        if (!Array.isArray(events)) {
+            return output;
+        }
+
+        // resultイベントを優先
         const resultEvent = events.find(
-            e => e.type === "result" && typeof e.result === "string"
+            e =>
+                e.type === "result" &&
+                typeof e.result === "string"
         );
-        if (resultEvent) return resultEvent.result;
 
-        // 2. 最後の assistant の text を結合
+        if (resultEvent) {
+            return resultEvent.result;
+        }
+
+        // assistant textを結合
         const assistantTexts = events
-            .filter(e => e.type === "assistant" && e.message?.content)
-            .flatMap(e => e.message.content)
-            .filter(c => c.type === "text")
-            .map(c => c.text);
+            .filter(
+                e =>
+                    e.type === "assistant" &&
+                    e.message?.content
+            )
+            .flatMap(
+                e => e.message.content
+            )
+            .filter(
+                c => c.type === "text"
+            )
+            .map(
+                c => c.text
+            );
 
         if (assistantTexts.length > 0) {
             return assistantTexts.join("\n");
         }
 
         return output;
+
     } catch {
         return output;
     }
@@ -128,27 +133,21 @@ async function runCommand(
     return await new Promise(
         (resolve, reject) => {
 
-            const child =
-                spawn(
-                    command,
-                    args,
-                    {
-                        cwd: PROJECT_ROOT,
-                        windowsHide: true,
-                        shell: true
-                    }
-                );
+            const child = spawn(
+                command,
+                args,
+                {
+                    cwd: PROJECT_ROOT,
+                    windowsHide: true,
+                    shell: true
+                }
+            );
 
             let stdout = "";
             let stderr = "";
 
-            child.stdout.setEncoding(
-                "utf8"
-            );
-
-            child.stderr.setEncoding(
-                "utf8"
-            );
+            child.stdout.setEncoding("utf8");
+            child.stderr.setEncoding("utf8");
 
             child.stdout.on(
                 "data",
@@ -190,57 +189,95 @@ async function runCommand(
 // ============================================================
 
 async function runQwen(prompt) {
-    console.log("\n===== Qwen starting =====\n");
 
-    // 一時ファイルにプロンプトを書く
+    console.log(
+        "\n===== Qwen starting =====\n"
+    );
+
     const tempFile = join(
         tmpdir(),
         `qwen-prompt-${randomBytes(8).toString("hex")}.txt`
     );
-    await writeFile(tempFile, prompt, "utf8");
+
+    await writeFile(
+        tempFile,
+        prompt,
+        "utf8"
+    );
 
     try {
-        return await new Promise((resolve, reject) => {
-            // ファイル内容を stdin に流す形で起動
-            const child = spawn(
-                `qwen -y -o json < "${tempFile}"`,
-                {
-                    cwd: PROJECT_ROOT,
-                    windowsHide: true,
-                    shell: true
-                }
-            );
 
-            let stdout = "";
-            let stderr = "";
+        return await new Promise(
+            (resolve, reject) => {
 
-            child.stdout.setEncoding("utf8");
-            child.stderr.setEncoding("utf8");
+                const child = spawn(
+                    `qwen -y -o json < "${tempFile}"`,
+                    {
+                        cwd: PROJECT_ROOT,
+                        windowsHide: true,
+                        shell: true
+                    }
+                );
 
-            child.stdout.on("data", data => {
-                stdout += data;
-                // 進行状況が見えるようにする
-                process.stdout.write(".");
-            });
+                let stdout = "";
+                let stderr = "";
 
-            child.stderr.on("data", data => {
-                stderr += data;
-                console.error(data);
-            });
+                child.stdout.setEncoding("utf8");
+                child.stderr.setEncoding("utf8");
 
-            child.on("error", reject);
+                child.stdout.on(
+                    "data",
+                    data => {
+                        stdout += data;
 
-            child.on("close", code => {
-                console.log(""); // 改行
-                if (code !== 0) {
-                    reject(new Error(`Qwen exited with code ${code}\n${stderr}`));
-                    return;
-                }
-                resolve(extractQwenResult(stdout));
-            });
-        });
+                        // 進行状況
+                        process.stdout.write(".");
+                    }
+                );
+
+                child.stderr.on(
+                    "data",
+                    data => {
+                        stderr += data;
+
+                        process.stderr.write(data);
+                    }
+                );
+
+                child.on(
+                    "error",
+                    reject
+                );
+
+                child.on(
+                    "close",
+                    code => {
+
+                        console.log("");
+
+                        if (code !== 0) {
+
+                            reject(
+                                new Error(
+                                    `Qwen exited with code ${code}\n${stderr}`
+                                )
+                            );
+
+                            return;
+                        }
+
+                        resolve(
+                            extractQwenResult(
+                                stdout
+                            )
+                        );
+                    }
+                );
+            }
+        );
+
     } finally {
-        // 一時ファイルを削除
+
         try {
             await unlink(tempFile);
         } catch {
@@ -269,11 +306,10 @@ async function reviewWithOpenRouter(
     };
 
     const body =
-        JSON.stringify(
-            requestBody
-        );
+        JSON.stringify(requestBody);
 
     const options = {
+
         hostname:
             "openrouter.ai",
 
@@ -284,6 +320,7 @@ async function reviewWithOpenRouter(
             "POST",
 
         headers: {
+
             "Authorization":
                 `Bearer ${apiKey}`,
 
@@ -306,15 +343,12 @@ async function reviewWithOpenRouter(
                         let responseData =
                             "";
 
-                        res.setEncoding(
-                            "utf8"
-                        );
+                        res.setEncoding("utf8");
 
                         res.on(
                             "data",
                             chunk => {
-                                responseData +=
-                                    chunk;
+                                responseData += chunk;
                             }
                         );
 
@@ -325,11 +359,14 @@ async function reviewWithOpenRouter(
                                 let response;
 
                                 try {
+
                                     response =
                                         JSON.parse(
                                             responseData
                                         );
+
                                 } catch {
+
                                     reject(
                                         new Error(
                                             "OpenRouter returned invalid JSON."
@@ -343,6 +380,7 @@ async function reviewWithOpenRouter(
                                     res.statusCode < 200 ||
                                     res.statusCode >= 300
                                 ) {
+
                                     reject(
                                         new Error(
                                             `OpenRouter HTTP ${res.statusCode}\n` +
@@ -357,9 +395,7 @@ async function reviewWithOpenRouter(
                                     return;
                                 }
 
-                                resolve(
-                                    response
-                                );
+                                resolve(response);
                             }
                         );
                     }
@@ -374,6 +410,238 @@ async function reviewWithOpenRouter(
             req.end();
         }
     );
+}
+
+// ============================================================
+// Nemotron Review
+// ============================================================
+
+async function runSupervisorReview({
+    supervisorTemplate,
+    task,
+    qwenResult,
+    buildText,
+    gitBefore,
+    gitAfter,
+    todo,
+    iteration
+}) {
+
+    const supervisorPrompt =
+        applyTemplate(
+            supervisorTemplate,
+            {
+                PROJECT_ROOT,
+                TASK: task,
+                QWEN_RESULT: qwenResult,
+                BUILD_RESULT: buildText,
+                GIT_BEFORE: gitBefore,
+                GIT_AFTER: gitAfter,
+                TODO: todo,
+                ITERATION: String(iteration)
+            }
+        );
+
+    const response =
+        await reviewWithOpenRouter(
+            supervisorPrompt
+        );
+
+    const reviewText =
+        response
+            .choices?.[0]
+            ?.message
+            ?.content ??
+        "";
+
+    if (!reviewText.trim()) {
+
+        throw new Error(
+            "Nemotron returned empty review."
+        );
+    }
+
+    return {
+        text: reviewText,
+        model:
+            response.model ??
+            "(unknown)",
+        provider:
+            response.provider ??
+            "(unknown)",
+        usage:
+            response.usage ??
+            {}
+    };
+}
+
+// ============================================================
+// Supervisor Decision Parser
+// ============================================================
+
+function parseSupervisorDecision(
+    reviewText,
+    buildExitCode
+) {
+
+    let parsed;
+
+    try {
+
+        // ```json ... ``` を除去
+        const cleaned =
+            reviewText
+                .replace(
+                    /^```json\s*/i,
+                    ""
+                )
+                .replace(
+                    /\s*```$/i,
+                    ""
+                )
+                .trim();
+
+        parsed =
+            JSON.parse(cleaned);
+
+    } catch {
+
+        // JSONとして解析できなかった場合
+        // Build失敗なら安全側に倒してFIX
+        if (buildExitCode !== 0) {
+
+            return {
+                decision: "FIX",
+                summary:
+                    "NemotronのJSON解析に失敗し、Buildも失敗しているためFIXと判定します。",
+                instructions: [
+                    "現在のBuildエラーを確認し、原因を調査して修正してください。",
+                    "修正後にdotnet buildを実行してください。"
+                ],
+                continue: true
+            };
+        }
+
+        // Build成功でもSupervisor判定不明なら
+        // PASSにはしない
+        return {
+            decision: "FIX",
+            summary:
+                "Nemotronの判定をJSONとして解析できませんでした。",
+            instructions: [
+                "現在の実装状態を再確認してください。",
+                "dotnet buildを実行し、問題があれば修正してください。"
+            ],
+            continue: true
+        };
+    }
+
+    // Build失敗時のPASS禁止
+    if (
+        buildExitCode !== 0 &&
+        parsed.decision === "PASS"
+    ) {
+
+        return {
+            ...parsed,
+            decision: "FIX",
+            summary:
+                `${parsed.summary ?? ""}\n` +
+                "ただしBuild exit codeが0ではないため、PASSは禁止されています。",
+            continue: true
+        };
+    }
+
+    if (
+        parsed.decision !== "PASS" &&
+        parsed.decision !== "FIX"
+    ) {
+
+        return {
+            ...parsed,
+            decision: "FIX",
+            summary:
+                "NemotronのdecisionがPASS/FIXではありません。",
+            instructions: [
+                "現在の状態を再確認し、Build成功まで修正してください。"
+            ],
+            continue: true
+        };
+    }
+
+    return parsed;
+}
+
+// ============================================================
+// Build
+// ============================================================
+
+async function runBuild() {
+
+    console.log(
+        "\n===== Build Verification =====\n"
+    );
+
+    const buildResult =
+        await runCommand(
+            "dotnet",
+            [
+                "build",
+                "ComfyUI.PromptDictionary.slnx"
+            ]
+        );
+
+    console.log(
+        `Build exit code: ${buildResult.code}`
+    );
+
+    if (buildResult.stdout) {
+        console.log(
+            buildResult.stdout
+        );
+    }
+
+    if (buildResult.stderr) {
+        console.error(
+            buildResult.stderr
+        );
+    }
+
+    const buildText =
+        [
+            `Exit code: ${buildResult.code}`,
+            "",
+            "STDOUT:",
+            buildResult.stdout,
+            "",
+            "STDERR:",
+            buildResult.stderr
+        ].join("\n");
+
+    return {
+        code:
+            buildResult.code,
+        text:
+            buildText
+    };
+}
+
+// ============================================================
+// Git
+// ============================================================
+
+async function getGitStatus() {
+
+    const result =
+        await runCommand(
+            "git",
+            [
+                "status",
+                "--short"
+            ]
+        );
+
+    return result.stdout;
 }
 
 // ============================================================
@@ -415,7 +683,7 @@ async function main() {
         console.log("");
 
         // ----------------------------------------------------
-        // 1. External prompts
+        // 1. Load prompts
         // ----------------------------------------------------
 
         const supervisorTemplate =
@@ -431,6 +699,7 @@ async function main() {
             ).trim();
 
         if (!task) {
+
             throw new Error(
                 "TASK is empty."
             );
@@ -440,9 +709,7 @@ async function main() {
             "Task:"
         );
 
-        console.log(
-            task
-        );
+        console.log(task);
 
         console.log("");
 
@@ -465,203 +732,286 @@ async function main() {
         const todoText =
             todoResult.stdout;
 
-        const gitBeforeResult =
-            await runCommand(
-                "git",
-                [
-                    "status",
-                    "--short"
-                ]
-            );
-
         const gitBeforeText =
-            gitBeforeResult.stdout;
+            await getGitStatus();
 
         // ----------------------------------------------------
-        // 3. Qwen
+        // 3. Initial Qwen task
         // ----------------------------------------------------
 
-        const qwenPrompt =
+        let qwenPrompt =
             [
                 task,
                 "",
-                "作業完了後、実施内容と結果を日本語で報告してください。"
+                "作業完了後、実施内容と結果を日本語で報告してください。",
+                "",
+                "重要:",
+                "実際にファイルを確認してから判断してください。",
+                "推測だけでAPIや型を決めないでください。",
+                "作業後は可能な限りビルドまたはテストを実行してください。"
             ].join("\n");
 
-        const qwenResult =
-            await runQwen(
+        // ----------------------------------------------------
+        // 4. Supervisor loop
+        // ----------------------------------------------------
+
+        let finalReview = null;
+
+        for (
+            let iteration = 1;
+            iteration <= MAX_ITERATIONS;
+            iteration++
+        ) {
+
+            console.log(
+                "\n========================================"
+            );
+
+            console.log(
+                ` Supervisor Iteration ${iteration}/${MAX_ITERATIONS}`
+            );
+
+            console.log(
+                "========================================\n"
+            );
+
+            // ------------------------------------------------
+            // Qwen
+            // ------------------------------------------------
+
+            let qwenResult;
+
+            try {
+
+                qwenResult =
+                    await runQwen(
+                        qwenPrompt
+                    );
+
+            } catch (error) {
+
+                qwenResult =
+                    `Qwen execution failed:\n${error.message}`;
+
+                console.error(
+                    qwenResult
+                );
+            }
+
+            console.log(
+                "\n===== Qwen Response =====\n"
+            );
+
+            console.log(
+                qwenResult
+            );
+
+            // ------------------------------------------------
+            // Build
+            // ------------------------------------------------
+
+            const build =
+                await runBuild();
+
+            // ------------------------------------------------
+            // Git after
+            // ------------------------------------------------
+
+            const gitAfterText =
+                await getGitStatus();
+
+            // ------------------------------------------------
+            // Nemotron
+            // ------------------------------------------------
+
+            console.log(
+                "\n===== Nemotron Supervisor =====\n"
+            );
+
+            const review =
+                await runSupervisorReview({
+                    supervisorTemplate,
+                    task,
+                    qwenResult,
+                    buildText: build.text,
+                    gitBefore: gitBeforeText,
+                    gitAfter: gitAfterText,
+                    todo: todoText,
+                    iteration
+                });
+
+            console.log(
+                "\nReview Result:"
+            );
+
+            console.log(
+                review.text
+            );
+
+            console.log("");
+
+            console.log(
+                "Model:"
+            );
+
+            console.log(
+                review.model
+            );
+
+            console.log("");
+
+            console.log(
+                "Provider:"
+            );
+
+            console.log(
+                review.provider
+            );
+
+            console.log("");
+
+            console.log(
+                "Usage:"
+            );
+
+            console.log(
+                JSON.stringify(
+                    review.usage,
+                    null,
+                    2
+                )
+            );
+
+            // ------------------------------------------------
+            // Parse decision
+            // ------------------------------------------------
+
+            const decision =
+                parseSupervisorDecision(
+                    review.text,
+                    build.code
+                );
+
+            console.log(
+                "\n===== Supervisor Decision =====\n"
+            );
+
+            console.log(
+                JSON.stringify(
+                    decision,
+                    null,
+                    2
+                )
+            );
+
+            // ------------------------------------------------
+            // PASS
+            // ------------------------------------------------
+
+            if (
+                decision.decision === "PASS" &&
+                build.code === 0
+            ) {
+
+                console.log(
+                    "\n========================================"
+                );
+
+                console.log(
+                    " SUPERVISOR PASS"
+                );
+
+                console.log(
+                    "========================================"
+                );
+
+                finalReview =
+                    decision;
+
+                await notifyCompletion();
+
+                return;
+            }
+
+            // ------------------------------------------------
+            // MAX ITERATION
+            // ------------------------------------------------
+
+            if (
+                iteration >= MAX_ITERATIONS
+            ) {
+
+                console.error(
+                    "\n========================================"
+                );
+
+                console.error(
+                    " SUPERVISOR FAILED"
+                );
+
+                console.error(
+                    "========================================"
+                );
+
+                console.error(
+                    `最大試行回数 ${MAX_ITERATIONS} 回に到達しました。`
+                );
+
+                console.error(
+                    "人間による確認が必要です。"
+                );
+
+                process.exitCode = 2;
+
+                return;
+            }
+
+            // ------------------------------------------------
+            // FIX
+            // ------------------------------------------------
+
+            const instructions =
+                Array.isArray(
+                    decision.instructions
+                )
+                    ? decision.instructions
+                    : [
+                        decision.summary ??
+                        "問題を調査して修正してください。"
+                    ];
+
+            qwenPrompt =
+                [
+                    "前回の作業についてSupervisorから修正指示が出ています。",
+                    "",
+                    "===== Supervisor Review =====",
+                    decision.summary ?? "",
+                    "",
+                    "===== 修正指示 =====",
+                    ...instructions.map(
+                        (instruction, index) =>
+                            `${index + 1}. ${instruction}`
+                    ),
+                    "",
+                    "===== Build Result =====",
+                    build.text,
+                    "",
+                    "===== 重要ルール =====",
+                    "Supervisorの指摘を確認してください。",
+                    "実ファイルを確認してから修正してください。",
+                    "推測だけでAPIを変更しないでください。",
+                    "修正後は可能な限りdotnet buildを実行してください。",
+                    "作業完了後、実施内容と結果を日本語で報告してください。"
+                ].join("\n");
+
+            console.log(
+                "\n===== Returning to Qwen =====\n"
+            );
+
+            console.log(
                 qwenPrompt
             );
-
-        console.log(
-            "\n===== Qwen Response =====\n"
-        );
-
-        console.log(
-            qwenResult
-        );
-
-        // ----------------------------------------------------
-        // 4. Build
-        // ----------------------------------------------------
-
-        console.log(
-            "\n===== Build Verification =====\n"
-        );
-
-        const buildResult =
-            await runCommand(
-                "dotnet",
-                [
-                    "build",
-                    "ComfyUI.PromptDictionary.slnx"
-                ]
-            );
-
-        console.log(
-            `Build exit code: ${buildResult.code}`
-        );
-
-        if (buildResult.stdout) {
-            console.log(
-                buildResult.stdout
-            );
         }
-
-        if (buildResult.stderr) {
-            console.error(
-                buildResult.stderr
-            );
-        }
-
-        const buildText =
-            [
-                `Exit code: ${buildResult.code}`,
-                "",
-                "STDOUT:",
-                buildResult.stdout,
-                "",
-                "STDERR:",
-                buildResult.stderr
-            ].join("\n");
-
-        // ----------------------------------------------------
-        // 5. Git after
-        // ----------------------------------------------------
-
-        const gitAfterResult =
-            await runCommand(
-                "git",
-                [
-                    "status",
-                    "--short"
-                ]
-            );
-
-        const gitAfterText =
-            gitAfterResult.stdout;
-
-        // ----------------------------------------------------
-        // 6. Nemotron review
-        // ----------------------------------------------------
-
-        console.log(
-            "\n===== Nemotron Supervisor =====\n"
-        );
-
-        const supervisorPrompt =
-            applyTemplate(
-                supervisorTemplate,
-                {
-                    PROJECT_ROOT,
-                    TASK: task,
-                    QWEN_RESULT: qwenResult,
-                    BUILD_RESULT: buildText,
-                    GIT_BEFORE: gitBeforeText,
-                    GIT_AFTER: gitAfterText,
-                    TODO: todoText
-                }
-            );
-
-        const response =
-            await reviewWithOpenRouter(
-                supervisorPrompt
-            );
-
-        const reviewText =
-            response
-                .choices?.[0]
-                ?.message
-                ?.content ??
-            "";
-
-        if (!reviewText.trim()) {
-            throw new Error(
-                "Nemotron returned empty review."
-            );
-        }
-
-        console.log(
-            "\nReview Result:"
-        );
-
-        console.log(
-            reviewText
-        );
-
-        console.log("");
-
-        console.log(
-            "Model:"
-        );
-
-        console.log(
-            response.model ??
-            "(unknown)"
-        );
-
-        console.log("");
-
-        console.log(
-            "Provider:"
-        );
-
-        console.log(
-            response.provider ??
-            "(unknown)"
-        );
-
-        console.log("");
-
-        console.log(
-            "Usage:"
-        );
-
-        console.log(
-            JSON.stringify(
-                response.usage ?? {},
-                null,
-                2
-            )
-        );
-
-        // ----------------------------------------------------
-        // 7. Complete
-        // ----------------------------------------------------
-
-        console.log(
-            "\n========================================"
-        );
-
-        console.log(
-            " OPENROUTER SUPERVISOR COMPLETE"
-        );
-
-        console.log(
-            "========================================"
-        );
-
-        await notifyCompletion();
 
     } catch (error) {
 
