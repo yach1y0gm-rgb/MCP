@@ -1,33 +1,24 @@
 import https from "https";
+import { spawn } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { readFile } from "node:fs/promises";
 import QwenDaemonClient from "./qwen-daemon-client.js";
 
-// ============================================================
-// Configuration
-// ============================================================
-
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-
 const PROJECT_ROOT = "E:\\tools\\AI\\project\\PromptDictionary";
 const QWEN_DAEMON_URL = "http://127.0.0.1:4170";
-
 const PROMPT_DIR = path.join(__dirname, "prompts");
 const SUPERVISOR_PROMPT_FILE = path.join(PROMPT_DIR, "openrouter-supervisor.txt");
 const TASK_FILE = path.join(PROMPT_DIR, "task.txt");
-
 const MODEL = "nvidia/nemotron-3-ultra-550b-a55b:free";
 const MAX_ITERATIONS = 5;
-
 const MAX_QWEN_RESULT_CHARS = 12000;
 const MAX_BUILD_RESULT_CHARS = 12000;
 const MAX_GIT_RESULT_CHARS = 8000;
-
 const OPENROUTER_MAX_RETRIES = 3;
 const OPENROUTER_RETRY_DELAY_MS = 3000;
-
 const apiKey = process.env.OPENROUTER_API_KEY;
 
 if (!apiKey) {
@@ -41,19 +32,11 @@ const qwenClient = new QwenDaemonClient({
     workspaceCwd: PROJECT_ROOT
 });
 
-// ============================================================
-// Utility
-// ============================================================
-
 async function readPromptFile(filePath) {
     try {
         return await readFile(filePath, "utf8");
     } catch (error) {
-        throw new Error([
-            "Prompt file could not be read:",
-            filePath,
-            error.message
-        ].join("\n"));
+        throw new Error(["Prompt file could not be read:", filePath, error.message].join("\n"));
     }
 }
 
@@ -68,61 +51,33 @@ function applyTemplate(template, values) {
 function limitText(text, maxChars) {
     if (!text) return "";
     if (text.length <= maxChars) return text;
-    return [
-        text.slice(0, maxChars),
-        "",
-        `[TRUNCATED: original ${text.length} chars]`
-    ].join("\n");
+    return [text.slice(0, maxChars), "", `[TRUNCATED: original ${text.length} chars]`].join("\n");
 }
-
-// ============================================================
-// Command
-// ============================================================
 
 async function runCommand(command, args) {
     return await new Promise((resolve, reject) => {
-        const child = require("node:child_process").spawn(
-            command,
-            args,
-            {
-                cwd: PROJECT_ROOT,
-                windowsHide: true,
-                shell: true
-            }
-        );
-
+        const child = spawn(command, args, {
+            cwd: PROJECT_ROOT,
+            windowsHide: true,
+            shell: true
+        });
         let stdout = "";
         let stderr = "";
-
         child.stdout.setEncoding("utf8");
         child.stderr.setEncoding("utf8");
-
-        child.stdout.on("data", data => {
-            stdout += data;
-        });
-
-        child.stderr.on("data", data => {
-            stderr += data;
-        });
-
+        child.stdout.on("data", data => { stdout += data; });
+        child.stderr.on("data", data => { stderr += data; });
         child.on("error", reject);
         child.on("close", code => resolve({ code, stdout, stderr }));
     });
 }
 
-// ============================================================
-// Qwen
-// ============================================================
-
 async function runQwen(prompt) {
     console.log("\n===== Qwen HTTP Bridge =====\n");
-
     try {
         const result = await qwenClient.run(prompt);
-
         console.log(`Qwen stopReason: ${result.stopReason ?? "(none)"}`);
         console.log(`Qwen response length: ${result.response.length} chars`);
-
         return result.response;
     } catch (error) {
         console.error("\n===== Qwen execution failed =====\n");
@@ -131,103 +86,59 @@ async function runQwen(prompt) {
     }
 }
 
-// ============================================================
-// OpenRouter
-// ============================================================
-
 async function reviewWithOpenRouter(prompt) {
-    const requestBody = {
+    const body = JSON.stringify({
         model: MODEL,
         messages: [{ role: "user", content: prompt }]
-    };
-
-    const body = JSON.stringify(requestBody);
+    });
     let lastError = null;
 
     for (let attempt = 1; attempt <= OPENROUTER_MAX_RETRIES; attempt++) {
         try {
-            console.log(
-                `Supervisor API attempt ${attempt}/${OPENROUTER_MAX_RETRIES}`
-            );
-
-            const response = await new Promise((resolve, reject) => {
-                const options = {
+            console.log(`Supervisor API attempt ${attempt}/${OPENROUTER_MAX_RETRIES}`);
+            return await new Promise((resolve, reject) => {
+                const req = https.request({
                     hostname: "openrouter.ai",
                     path: "/api/v1/chat/completions",
                     method: "POST",
                     headers: {
-                        "Authorization": `Bearer ${apiKey}`,
+                        Authorization: `Bearer ${apiKey}`,
                         "Content-Type": "application/json",
                         "Content-Length": Buffer.byteLength(body)
                     }
-                };
-
-                const req = https.request(options, res => {
+                }, res => {
                     let responseData = "";
                     res.setEncoding("utf8");
-
-                    res.on("data", chunk => {
-                        responseData += chunk;
-                    });
-
+                    res.on("data", chunk => { responseData += chunk; });
                     res.on("end", () => {
                         let parsed;
-
-                        try {
-                            parsed = JSON.parse(responseData);
-                        } catch {
-                            reject(new Error("OpenRouter returned invalid JSON."));
-                            return;
-                        }
-
+                        try { parsed = JSON.parse(responseData); }
+                        catch { reject(new Error("OpenRouter returned invalid JSON.")); return; }
                         if (res.statusCode < 200 || res.statusCode >= 300) {
-                            const error = new Error(
-                                `OpenRouter HTTP ${res.statusCode}\n` +
-                                JSON.stringify(parsed, null, 2)
-                            );
+                            const error = new Error(`OpenRouter HTTP ${res.statusCode}\n${JSON.stringify(parsed, null, 2)}`);
                             error.statusCode = res.statusCode;
                             reject(error);
                             return;
                         }
-
                         resolve(parsed);
                     });
                 });
-
                 req.on("error", reject);
                 req.write(body);
                 req.end();
             });
-
-            return response;
         } catch (error) {
             lastError = error;
             console.error(`Supervisor API error: ${error.message}`);
-
             if (attempt < OPENROUTER_MAX_RETRIES) {
-                await new Promise(resolve =>
-                    setTimeout(resolve, OPENROUTER_RETRY_DELAY_MS * attempt)
-                );
+                await new Promise(resolve => setTimeout(resolve, OPENROUTER_RETRY_DELAY_MS * attempt));
             }
         }
     }
-
     throw lastError;
 }
 
-// ============================================================
-// Supervisor Review
-// ============================================================
-
-async function runSupervisorReview({
-    supervisorTemplate,
-    task,
-    qwenResult,
-    buildRequired,
-    buildText,
-    gitDiff,
-    iteration
-}) {
+async function runSupervisorReview({ supervisorTemplate, task, qwenResult, buildRequired, buildText, gitDiff, iteration }) {
     const supervisorPrompt = applyTemplate(supervisorTemplate, {
         PROJECT_ROOT,
         TASK: task,
@@ -240,83 +151,48 @@ async function runSupervisorReview({
 
     console.log(`Supervisor prompt size: ${supervisorPrompt.length} chars`);
 
-    async function reviewWithOpenRouterRetry(prompt, maxRetries = 2) {
-        let lastError = null;
-
-        for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
-            try {
-                const response = await reviewWithOpenRouter(prompt);
-
-                if (response?.error) {
-                    const errorCode = response.error.code ?? "unknown";
-                    const errorMessage =
-                        response.error.message ?? "Unknown OpenRouter error.";
-                    throw new Error(
-                        `OpenRouter API error (code ${errorCode}): ${errorMessage}`
-                    );
-                }
-
-                return response;
-            } catch (error) {
-                lastError = error;
-                console.error(
-                    `OpenRouter review failed (attempt ${attempt}/${maxRetries + 1})`
-                );
-                console.error(error.message);
-
-                if (attempt <= maxRetries) {
-                    const delay = 2000 * attempt;
-                    console.log(`Retrying in ${delay / 1000} seconds...`);
-                    await new Promise(resolve => setTimeout(resolve, delay));
-                }
+    let lastError = null;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+            const response = await reviewWithOpenRouter(supervisorPrompt);
+            if (response?.error) {
+                throw new Error(`OpenRouter API error (code ${response.error.code ?? "unknown"}): ${response.error.message ?? "Unknown OpenRouter error."}`);
+            }
+            console.log("\n===== Raw Nemotron Response =====\n");
+            console.log(JSON.stringify(response, null, 2));
+            const reviewText = response.choices?.[0]?.message?.content ?? "";
+            if (!reviewText.trim()) throw new Error("Nemotron returned empty review.");
+            return {
+                text: reviewText,
+                model: response.model ?? "(unknown)",
+                provider: response.provider ?? "(unknown)",
+                usage: response.usage ?? {}
+            };
+        } catch (error) {
+            lastError = error;
+            console.error(`OpenRouter review failed (attempt ${attempt}/3)`);
+            console.error(error.message);
+            if (attempt < 3) {
+                const delay = 2000 * attempt;
+                console.log(`Retrying in ${delay / 1000} seconds...`);
+                await new Promise(resolve => setTimeout(resolve, delay));
             }
         }
-
-        throw lastError;
     }
-
-    const response = await reviewWithOpenRouterRetry(supervisorPrompt);
-
-    console.log("\n===== Raw Nemotron Response =====\n");
-    console.log(JSON.stringify(response, null, 2));
-
-    const reviewText = response.choices?.[0]?.message?.content ?? "";
-
-    if (!reviewText.trim()) {
-        throw new Error("Nemotron returned empty review.");
-    }
-
-    return {
-        text: reviewText,
-        model: response.model ?? "(unknown)",
-        provider: response.provider ?? "(unknown)",
-        usage: response.usage ?? {}
-    };
+    throw lastError;
 }
-
-// ============================================================
-// Supervisor Decision Parser
-// ============================================================
 
 function parseSupervisorDecision(reviewText, buildRequired, buildExitCode) {
     let parsed;
-
     try {
-        const cleaned = reviewText
-            .replace(/^```json\s*/i, "")
-            .replace(/\s*```$/i, "")
-            .trim();
-
-        parsed = JSON.parse(cleaned);
+        parsed = JSON.parse(reviewText.replace(/^```json\s*/i, "").replace(/\s*```$/i, "").trim());
     } catch {
         return {
             decision: "FIX",
             summary: "SupervisorのJSON解析に失敗しました。安全側に倒してFIXとします。",
             instructions: [
                 "現在の実装状態を確認してください。",
-                buildRequired && buildExitCode !== 0
-                    ? "Buildエラーを確認して修正してください。"
-                    : "作業内容と実際の変更状態を再確認してください。"
+                buildRequired && buildExitCode !== 0 ? "Buildエラーを確認して修正してください。" : "作業内容と実際の変更状態を再確認してください。"
             ],
             continue: true
         };
@@ -332,41 +208,23 @@ function parseSupervisorDecision(reviewText, buildRequired, buildExitCode) {
         };
     }
 
-    if (
-        buildRequired &&
-        buildExitCode !== 0 &&
-        parsed.decision === "PASS"
-    ) {
+    if (buildRequired && buildExitCode !== 0 && parsed.decision === "PASS") {
         return {
             ...parsed,
             decision: "FIX",
-            summary:
-                `${parsed.summary ?? ""}\n` +
-                "BUILD_REQUIRED=true ですがBuildが失敗しているためPASSは禁止されています。",
+            summary: `${parsed.summary ?? ""}\nBUILD_REQUIRED=true ですがBuildが失敗しているためPASSは禁止されています。`,
             continue: true
         };
     }
-
     return parsed;
 }
 
-// ============================================================
-// Build
-// ============================================================
-
 async function runBuild() {
     console.log("\n===== Build Verification =====\n");
-
-    const result = await runCommand("dotnet", [
-        "build",
-        "ComfyUI.PromptDictionary.slnx"
-    ]);
-
+    const result = await runCommand("dotnet", ["build", "ComfyUI.PromptDictionary.slnx"]);
     console.log(`Build exit code: ${result.code}`);
-
     if (result.stdout) console.log(result.stdout);
     if (result.stderr) console.error(result.stderr);
-
     return {
         code: result.code,
         text: [
@@ -381,44 +239,20 @@ async function runBuild() {
     };
 }
 
-// ============================================================
-// Git
-// ============================================================
-
 async function getGitDiff() {
     const stat = await runCommand("git", ["diff", "--stat"]);
     const nameStatus = await runCommand("git", ["diff", "--name-status"]);
-
-    return [
-        "===== Diff Stat =====",
-        stat.stdout,
-        "",
-        "===== Changed Files =====",
-        nameStatus.stdout
-    ].join("\n");
+    return ["===== Diff Stat =====", stat.stdout, "", "===== Changed Files =====", nameStatus.stdout].join("\n");
 }
-
-// ============================================================
-// Notification
-// ============================================================
 
 async function notifyCompletion() {
-    await runCommand("powershell", [
-        "-NoProfile",
-        "-Command",
-        "[console]::beep(600,200); [console]::beep(800,200)"
-    ]);
+    await runCommand("powershell", ["-NoProfile", "-Command", "[console]::beep(600,200); [console]::beep(800,200)"]);
 }
-
-// ============================================================
-// FIX Prompt
-// ============================================================
 
 function createFixQwenPrompt({ task, decision, buildText }) {
     const instructions = Array.isArray(decision.instructions)
         ? decision.instructions
         : [decision.summary ?? "問題を調査して修正してください。"];
-
     return [
         "前回の作業についてSupervisorから修正指示が出ています。",
         "",
@@ -429,9 +263,7 @@ function createFixQwenPrompt({ task, decision, buildText }) {
         decision.summary ?? "",
         "",
         "===== 修正指示 =====",
-        ...instructions.map((instruction, index) =>
-            `${index + 1}. ${instruction}`
-        ),
+        ...instructions.map((instruction, index) => `${index + 1}. ${instruction}`),
         "",
         "===== Build Result =====",
         limitText(buildText, MAX_BUILD_RESULT_CHARS),
@@ -449,23 +281,14 @@ function createFixQwenPrompt({ task, decision, buildText }) {
     ].join("\n");
 }
 
-// ============================================================
-// Main
-// ============================================================
-
 async function main() {
     try {
         console.log("========================================");
         console.log(" OpenRouter Supervisor");
-        console.log("========================================");
-        console.log("");
+        console.log("========================================\n");
 
-        const supervisorTemplate = await readPromptFile(
-            SUPERVISOR_PROMPT_FILE
-        );
-
+        const supervisorTemplate = await readPromptFile(SUPERVISOR_PROMPT_FILE);
         const task = (await readPromptFile(TASK_FILE)).trim();
-
         if (!task) throw new Error("TASK is empty.");
 
         console.log("Task:");
@@ -519,7 +342,6 @@ async function main() {
             console.log("========================================\n");
 
             let qwenResult;
-
             try {
                 qwenResult = await runQwen(qwenPrompt);
             } catch (error) {
@@ -528,7 +350,6 @@ async function main() {
             }
 
             let build;
-
             if (buildRequired) {
                 build = await runBuild();
             } else {
@@ -540,7 +361,6 @@ async function main() {
             const gitDiffText = await getGitDiff();
 
             console.log("\n===== Nemotron Supervisor =====\n");
-
             const review = await runSupervisorReview({
                 supervisorTemplate,
                 task,
@@ -563,19 +383,11 @@ async function main() {
             console.log("Usage:");
             console.log(JSON.stringify(review.usage, null, 2));
 
-            const decision = parseSupervisorDecision(
-                review.text,
-                buildRequired,
-                build.code
-            );
-
+            const decision = parseSupervisorDecision(review.text, buildRequired, build.code);
             console.log("\n===== Supervisor Decision =====\n");
             console.log(JSON.stringify(decision, null, 2));
 
-            if (
-                decision.decision === "PASS" &&
-                (!buildRequired || build.code === 0)
-            ) {
+            if (decision.decision === "PASS" && (!buildRequired || build.code === 0)) {
                 console.log("\n========================================");
                 console.log(" SUPERVISOR PASS");
                 console.log("========================================");
@@ -593,12 +405,7 @@ async function main() {
                 return;
             }
 
-            qwenPrompt = createFixQwenPrompt({
-                task,
-                decision,
-                buildText: build.text
-            });
-
+            qwenPrompt = createFixQwenPrompt({ task, decision, buildText: build.text });
             console.log("\n===== Returning to Qwen =====\n");
             console.log(qwenPrompt);
         }
