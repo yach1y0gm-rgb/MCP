@@ -2,10 +2,16 @@ const DEFAULT_BASE_URL = "http://127.0.0.1:4170";
 const DEFAULT_TIMEOUT_MS = 60 * 60 * 1000;
 
 export class QwenDaemonClient {
-    constructor({ baseUrl = DEFAULT_BASE_URL, timeoutMs = DEFAULT_TIMEOUT_MS, workspaceCwd = null } = {}) {
+    constructor({
+        baseUrl = DEFAULT_BASE_URL,
+        timeoutMs = DEFAULT_TIMEOUT_MS,
+        workspaceCwd = null,
+        requestWorkspace = false
+    } = {}) {
         this.baseUrl = baseUrl.replace(/\/$/, "");
         this.timeoutMs = timeoutMs;
         this.workspaceCwd = workspaceCwd;
+        this.requestWorkspace = requestWorkspace;
     }
 
     async request(path, options = {}) {
@@ -37,7 +43,10 @@ export class QwenDaemonClient {
             sessionScope: "thread"
         };
 
-        if (this.workspaceCwd) {
+        // By default, let qwen serve select its bound/registered runtime.
+        // Explicit workspace selection is opt-in because an HTTP-bridge
+        // daemon may be bound to one workspace and reject another.
+        if (this.requestWorkspace && this.workspaceCwd) {
             payload.cwd = this.workspaceCwd;
         }
 
@@ -68,20 +77,15 @@ export class QwenDaemonClient {
         if (!sessionId) throw new Error("sessionId is required.");
 
         const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 10000);
+        const timeout = setTimeout(() => controller.abort(), Math.min(this.timeoutMs, 10000));
 
         try {
             const response = await fetch(
                 `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/cancel`,
-                {
-                    method: "POST",
-                    signal: controller.signal
-                }
+                { method: "POST", signal: controller.signal }
             );
 
-            if (response.status === 204 || response.ok) {
-                return true;
-            }
+            if (response.status === 204 || response.ok) return true;
 
             const text = await response.text();
             throw new Error(`Qwen daemon cancel HTTP ${response.status} ${response.statusText}: ${text}`);
@@ -173,7 +177,10 @@ export class QwenDaemonClient {
         let promptId = null;
         let stopReason = null;
 
-        const turnPromise = new Promise((resolve, reject) => { resolveTurn = resolve; rejectTurn = reject; });
+        const turnPromise = new Promise((resolve, reject) => {
+            resolveTurn = resolve;
+            rejectTurn = reject;
+        });
 
         const updateUsage = (payload, update) => {
             const eventUsage =
@@ -240,7 +247,9 @@ export class QwenDaemonClient {
             try {
                 await this.cancelActivePrompt(sessionId);
             } catch (cancelError) {
-                streamError = new Error(`Qwen daemon turn timed out and cancel failed: ${cancelError.message}`);
+                streamError = new Error(
+                    `Qwen daemon turn timed out and cancel failed: ${cancelError.message}`
+                );
             }
             rejectTurn(new Error(`Qwen daemon turn timed out after ${timeoutMs} ms.`));
         }, timeoutMs);
