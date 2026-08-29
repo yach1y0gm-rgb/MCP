@@ -55,7 +55,7 @@ export class QwenDaemonClient {
         });
     }
 
-    async connectEvents(sessionId, onEvent, { signal } = {}) {
+    async connectEvents(sessionId, onEvent, { signal, onConnected } = {}) {
         if (!sessionId) throw new Error("sessionId is required.");
         const response = await fetch(`${this.baseUrl}/session/${encodeURIComponent(sessionId)}/events`, {
             headers: { Accept: "text/event-stream" },
@@ -71,6 +71,8 @@ export class QwenDaemonClient {
         const decoder = new TextDecoder();
         let buffer = "";
         let currentEvent = { id: null, event: "message", data: [] };
+
+        if (onConnected) await onConnected();
 
         const dispatch = async () => {
             if (currentEvent.data.length === 0) {
@@ -119,28 +121,29 @@ export class QwenDaemonClient {
     async collectTurn(sessionId, prompt, { timeoutMs = this.timeoutMs } = {}) {
         const controller = new AbortController();
         let timeoutHandle;
-        const timeoutPromise = new Promise((_, reject) => {
-            timeoutHandle = setTimeout(() => {
-                controller.abort();
-                reject(new Error(`Qwen daemon turn timed out after ${timeoutMs} ms.`));
-            }, timeoutMs);
-        });
+        let resolveTurn;
+        let rejectTurn;
+        let connected = false;
+        let turnComplete = false;
+        let streamError = null;
 
         const chunks = [];
         let usage = null;
         let promptId = null;
         let stopReason = null;
-        let turnComplete = false;
-        let streamError = null;
-        let resolveTurn;
-        let rejectTurn;
-        const turnPromise = new Promise((resolve, reject) => { resolveTurn = resolve; rejectTurn = reject; });
+
+        const turnPromise = new Promise((resolve, reject) => {
+            resolveTurn = resolve;
+            rejectTurn = reject;
+        });
 
         const eventPromise = this.connectEvents(sessionId, async event => {
             const payload = event.parsed;
             if (!payload) return;
 
-            const update = payload.data?.update ?? payload.update ?? null;
+            // Qwen 0.22.3 HTTP bridge envelope:
+            // session_update -> data.update.{sessionUpdate,content,...}
+            const update = payload.data?.update ?? payload.update ?? payload;
             const sessionUpdate = update?.sessionUpdate ?? payload.sessionUpdate;
 
             if (sessionUpdate === "agent_message_chunk") {
@@ -149,44 +152,71 @@ export class QwenDaemonClient {
             }
 
             if (sessionUpdate === "usage_update") {
-                const eventUsage = update?._meta?.usage ?? payload._meta?.usage;
+                const eventUsage =
+                    update?._meta?.usage ??
+                    payload._meta?.usage ??
+                    payload.data?._meta?.usage;
+
                 usage = {
                     inputTokens: eventUsage?.inputTokens ?? usage?.inputTokens ?? null,
                     outputTokens: eventUsage?.outputTokens ?? usage?.outputTokens ?? null,
                     totalTokens: eventUsage?.totalTokens ?? usage?.totalTokens ?? null,
                     thoughtTokens: eventUsage?.thoughtTokens ?? usage?.thoughtTokens ?? null,
                     cachedReadTokens: eventUsage?.cachedReadTokens ?? usage?.cachedReadTokens ?? null,
-                    durationMs: update?._meta?.durationMs ?? payload._meta?.durationMs ?? usage?.durationMs ?? null,
-                    contextSize: update?.size ?? payload.size ?? usage?.contextSize ?? null,
-                    contextUsed: update?.used ?? payload.used ?? usage?.contextUsed ?? null
+                    durationMs: update?._meta?.durationMs ?? payload._meta?.durationMs ?? payload.data?._meta?.durationMs ?? usage?.durationMs ?? null,
+                    contextSize: update?.size ?? payload.size ?? payload.data?.size ?? usage?.contextSize ?? null,
+                    contextUsed: update?.used ?? payload.used ?? payload.data?.used ?? usage?.contextUsed ?? null
                 };
             }
 
             promptId = payload.promptId ?? update?.promptId ?? promptId;
 
             if (event.event === "turn_complete") {
-                stopReason = payload.stopReason ?? update?.stopReason ?? null;
+                stopReason =
+                    payload.stopReason ??
+                    payload.data?.stopReason ??
+                    payload.data?.update?.stopReason ??
+                    update?.stopReason ??
+                    null;
                 turnComplete = true;
                 resolveTurn();
             }
-        }, { signal: controller.signal }).catch(error => {
+        }, {
+            signal: controller.signal,
+            onConnected: () => {
+                connected = true;
+            }
+        }).catch(error => {
             streamError = error;
             rejectTurn(error);
         });
 
+        timeoutHandle = setTimeout(() => {
+            const error = new Error(`Qwen daemon turn timed out after ${timeoutMs} ms.`);
+            controller.abort();
+            rejectTurn(error);
+        }, timeoutMs);
+
         try {
-            await Promise.race([
-                (async () => {
-                    const promptResult = await this.sendPrompt(sessionId, prompt);
-                    promptId = promptResult?.promptId ?? promptId;
-                    await turnPromise;
-                })(),
-                timeoutPromise
-            ]);
-            return { response: chunks.join(""), promptId, stopReason, usage, turnComplete };
-        } catch (error) {
-            if (streamError) throw streamError;
-            throw error;
+            // Do not POST until the SSE response is established.
+            while (!connected) {
+                if (streamError) throw streamError;
+                await new Promise(resolve => setTimeout(resolve, 1));
+            }
+
+            const promptResult = await this.sendPrompt(sessionId, prompt);
+            promptId = promptResult?.promptId ?? promptId;
+            await turnPromise;
+
+            if (!turnComplete) throw new Error("Qwen turn ended without turn_complete.");
+
+            return {
+                response: chunks.join(""),
+                promptId,
+                stopReason,
+                usage,
+                turnComplete
+            };
         } finally {
             clearTimeout(timeoutHandle);
             controller.abort();
