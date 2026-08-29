@@ -132,10 +132,28 @@ export class QwenDaemonClient {
         let promptId = null;
         let stopReason = null;
 
-        const turnPromise = new Promise((resolve, reject) => {
-            resolveTurn = resolve;
-            rejectTurn = reject;
-        });
+        const turnPromise = new Promise((resolve, reject) => { resolveTurn = resolve; rejectTurn = reject; });
+
+        const updateUsage = (payload, update) => {
+            const eventUsage =
+                update?._meta?.usage ??
+                payload._meta?.usage ??
+                payload.data?._meta?.usage;
+
+            const meta = update?._meta ?? payload._meta ?? payload.data?._meta;
+            if (!eventUsage && !meta?.durationMs) return;
+
+            usage = {
+                inputTokens: eventUsage?.inputTokens ?? usage?.inputTokens ?? null,
+                outputTokens: eventUsage?.outputTokens ?? usage?.outputTokens ?? null,
+                totalTokens: eventUsage?.totalTokens ?? usage?.totalTokens ?? null,
+                thoughtTokens: eventUsage?.thoughtTokens ?? usage?.thoughtTokens ?? null,
+                cachedReadTokens: eventUsage?.cachedReadTokens ?? usage?.cachedReadTokens ?? null,
+                durationMs: meta?.durationMs ?? usage?.durationMs ?? null,
+                contextSize: update?.size ?? payload.size ?? payload.data?.size ?? usage?.contextSize ?? null,
+                contextUsed: update?.used ?? payload.used ?? payload.data?.used ?? usage?.contextUsed ?? null
+            };
+        };
 
         const eventPromise = this.connectEvents(sessionId, async event => {
             const payload = event.parsed;
@@ -149,24 +167,11 @@ export class QwenDaemonClient {
             if (sessionUpdate === "agent_message_chunk") {
                 const text = update?.content?.text ?? payload.content?.text;
                 if (typeof text === "string") chunks.push(text);
+                updateUsage(payload, update);
             }
 
             if (sessionUpdate === "usage_update") {
-                const eventUsage =
-                    update?._meta?.usage ??
-                    payload._meta?.usage ??
-                    payload.data?._meta?.usage;
-
-                usage = {
-                    inputTokens: eventUsage?.inputTokens ?? usage?.inputTokens ?? null,
-                    outputTokens: eventUsage?.outputTokens ?? usage?.outputTokens ?? null,
-                    totalTokens: eventUsage?.totalTokens ?? usage?.totalTokens ?? null,
-                    thoughtTokens: eventUsage?.thoughtTokens ?? usage?.thoughtTokens ?? null,
-                    cachedReadTokens: eventUsage?.cachedReadTokens ?? usage?.cachedReadTokens ?? null,
-                    durationMs: update?._meta?.durationMs ?? payload._meta?.durationMs ?? payload.data?._meta?.durationMs ?? usage?.durationMs ?? null,
-                    contextSize: update?.size ?? payload.size ?? payload.data?.size ?? usage?.contextSize ?? null,
-                    contextUsed: update?.used ?? payload.used ?? payload.data?.used ?? usage?.contextUsed ?? null
-                };
+                updateUsage(payload, update);
             }
 
             promptId = payload.promptId ?? update?.promptId ?? promptId;
