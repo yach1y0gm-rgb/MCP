@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 const DEFAULT_BASE_URL = "http://127.0.0.1:4170";
 const DEFAULT_TIMEOUT_MS = 60 * 60 * 1000;
 const DEFAULT_SESSION_TIMEOUT_MS = 15000;
+const DEFAULT_DIAGNOSTIC_RING_SIZE = 12;
 
 export class QwenDaemonClient {
     constructor({
@@ -11,7 +12,8 @@ export class QwenDaemonClient {
         sessionTimeoutMs = DEFAULT_SESSION_TIMEOUT_MS,
         workspaceCwd = null,
         requestWorkspace = false,
-        autoApproveTools = new Set(["read_file", "list_directory", "glob", "grep_search"])
+        autoApproveTools = new Set(["read_file", "list_directory", "glob", "grep_search"]),
+        diagnosticRingSize = DEFAULT_DIAGNOSTIC_RING_SIZE
     } = {}) {
         this.baseUrl = baseUrl.replace(/\/$/, "");
         this.timeoutMs = timeoutMs;
@@ -19,6 +21,7 @@ export class QwenDaemonClient {
         this.workspaceCwd = workspaceCwd;
         this.requestWorkspace = requestWorkspace;
         this.autoApproveTools = new Set(autoApproveTools);
+        this.diagnosticRingSize = diagnosticRingSize;
     }
 
     async request(path, options = {}, timeoutMs = this.timeoutMs) {
@@ -31,7 +34,9 @@ export class QwenDaemonClient {
             if (!text) return null;
             try { return JSON.parse(text); } catch { return text; }
         } catch (error) {
-            if (error?.name === "AbortError") throw new Error(`Qwen daemon request timed out after ${timeoutMs} ms: ${path}`);
+            if (error?.name === "AbortError") {
+                throw new Error(`Qwen daemon request timed out after ${timeoutMs} ms: ${path}`);
+            }
             throw error;
         } finally {
             clearTimeout(timer);
@@ -207,10 +212,12 @@ export class QwenDaemonClient {
         let connected = false;
         let streamError = null;
         let terminalEvent = null;
+        let terminalPayload = null;
         const chunks = [];
         let usage = null;
         let promptId = null;
         let stopReason = null;
+        const recentEvents = [];
         const stats = {
             totalEvents: 0,
             sessionUpdates: 0,
@@ -229,8 +236,21 @@ export class QwenDaemonClient {
         const turnPromise = new Promise((resolve, reject) => { resolveTurn = resolve; rejectTurn = reject; });
         const startedAt = Date.now();
 
-        const finishWithError = (message, event) => {
+        const rememberEvent = event => {
+            const update = event.parsed?.data?.update ?? event.parsed?.update ?? event.parsed;
+            recentEvents.push({
+                id: event.id,
+                event: event.event,
+                logical: update?.sessionUpdate ?? event.parsed?.sessionUpdate ?? null,
+                promptId: event.parsed?.promptId ?? null,
+                text: typeof update?.content?.text === "string" ? update.content.text.slice(0, 120) : null
+            });
+            while (recentEvents.length > this.diagnosticRingSize) recentEvents.shift();
+        };
+
+        const finishWithError = (message, event, payload) => {
             terminalEvent = event;
+            terminalPayload = payload;
             streamError = new Error(message);
             rejectTurn(streamError);
         };
@@ -256,11 +276,13 @@ export class QwenDaemonClient {
             const now = Date.now();
             stats.firstEventAt ??= now;
             stats.lastEventAt = now;
+            rememberEvent(event);
+
             const payload = event.parsed;
             if (!payload) return;
-
             const update = payload.data?.update ?? payload.update ?? payload;
             const sessionUpdate = update?.sessionUpdate ?? payload.sessionUpdate ?? null;
+
             if (event.event === "session_update") stats.sessionUpdates += 1;
             if (sessionUpdate === "agent_message_chunk") {
                 stats.agentMessageChunks += 1;
@@ -287,21 +309,22 @@ export class QwenDaemonClient {
             if (event.event === "turn_complete" || sessionUpdate === "turn_complete") {
                 stats.turnComplete += 1;
                 stopReason = payload.stopReason ?? payload.data?.stopReason ?? update?.stopReason ?? null;
-                terminalEvent = event.event;
+                terminalEvent = event.event === "session_update" ? sessionUpdate : event.event;
+                terminalPayload = payload;
                 resolveTurn();
                 return;
             }
 
             if (event.event === "prompt_cancelled" || sessionUpdate === "prompt_cancelled") {
                 stats.promptCancelled += 1;
-                finishWithError(`Qwen prompt cancelled${payload.message ? `: ${payload.message}` : "."}`, event.event);
+                finishWithError(`Qwen prompt cancelled${payload.message ? `: ${payload.message}` : "."}`, event.event === "session_update" ? sessionUpdate : event.event, payload);
                 return;
             }
 
             if (event.event === "turn_error" || sessionUpdate === "turn_error") {
                 stats.turnErrors += 1;
                 const detail = payload.message ?? payload.error?.message ?? payload.data?.message ?? update?.message ?? JSON.stringify(payload);
-                finishWithError(`Qwen turn error: ${detail}`, event.event);
+                finishWithError(`Qwen turn error: ${detail}`, event.event === "session_update" ? sessionUpdate : event.event, payload);
             }
         }, { signal: controller.signal, onConnected: () => { connected = true; } }).catch(error => {
             streamError = error;
@@ -330,7 +353,15 @@ export class QwenDaemonClient {
             console.log(`[QwenDaemonClient] diagnostics: events=${stats.totalEvents}, sessionUpdates=${stats.sessionUpdates}, agentChunks=${stats.agentMessageChunks}, responseChars=${stats.agentMessageChars}, toolCalls=${stats.toolCallEvents}, toolCallUpdates=${stats.toolCallUpdateEvents}, permissions=${stats.permissionRequests}, usageUpdates=${stats.usageUpdates}, turnComplete=${stats.turnComplete}, durationMs=${elapsedMs}, chunksPerSecond=${chunksPerSecond ?? "(n/a)"}`);
             return { response: chunks.join(""), promptId, stopReason, usage, turnComplete: stats.turnComplete > 0, diagnostics: stats };
         } catch (error) {
-            console.error(`[QwenDaemonClient] diagnostics before failure: events=${stats.totalEvents}, agentChunks=${stats.agentMessageChunks}, responseChars=${stats.agentMessageChars}, toolCalls=${stats.toolCallEvents}, toolCallUpdates=${stats.toolCallUpdateEvents}, permissions=${stats.permissionRequests}, turnComplete=${stats.turnComplete}, turnErrors=${stats.turnErrors}, promptCancelled=${stats.promptCancelled}`);
+            const elapsedMs = Math.max(0, Date.now() - startedAt);
+            console.error(`[QwenDaemonClient] diagnostics before failure: events=${stats.totalEvents}, sessionUpdates=${stats.sessionUpdates}, agentChunks=${stats.agentMessageChunks}, responseChars=${stats.agentMessageChars}, toolCalls=${stats.toolCallEvents}, toolCallUpdates=${stats.toolCallUpdateEvents}, permissions=${stats.permissionRequests}, usageUpdates=${stats.usageUpdates}, turnComplete=${stats.turnComplete}, turnErrors=${stats.turnErrors}, promptCancelled=${stats.promptCancelled}, elapsedMs=${elapsedMs}`);
+            if (terminalEvent) {
+                console.error(`[QwenDaemonClient] terminal event: ${terminalEvent}`);
+                console.error(`[QwenDaemonClient] terminal payload: ${JSON.stringify(terminalPayload, null, 2)}`);
+            }
+            if (recentEvents.length > 0) {
+                console.error(`[QwenDaemonClient] recent events: ${JSON.stringify(recentEvents, null, 2)}`);
+            }
             if (streamError) throw streamError;
             throw error;
         } finally {
