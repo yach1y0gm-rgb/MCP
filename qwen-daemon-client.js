@@ -1,22 +1,25 @@
 const DEFAULT_BASE_URL = "http://127.0.0.1:4170";
 const DEFAULT_TIMEOUT_MS = 60 * 60 * 1000;
+const DEFAULT_SESSION_TIMEOUT_MS = 15000;
 
 export class QwenDaemonClient {
     constructor({
         baseUrl = DEFAULT_BASE_URL,
         timeoutMs = DEFAULT_TIMEOUT_MS,
+        sessionTimeoutMs = DEFAULT_SESSION_TIMEOUT_MS,
         workspaceCwd = null,
         requestWorkspace = false
     } = {}) {
         this.baseUrl = baseUrl.replace(/\/$/, "");
         this.timeoutMs = timeoutMs;
+        this.sessionTimeoutMs = sessionTimeoutMs;
         this.workspaceCwd = workspaceCwd;
         this.requestWorkspace = requestWorkspace;
     }
 
-    async request(path, options = {}) {
+    async request(path, options = {}, timeoutMs = this.timeoutMs) {
         const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+        const timeout = setTimeout(() => controller.abort(), timeoutMs);
         try {
             const response = await fetch(`${this.baseUrl}${path}`, { ...options, signal: controller.signal });
             const text = await response.text();
@@ -27,7 +30,7 @@ export class QwenDaemonClient {
             try { return JSON.parse(text); } catch { return text; }
         } catch (error) {
             if (error?.name === "AbortError") {
-                throw new Error(`Qwen daemon request timed out after ${this.timeoutMs} ms: ${path}`);
+                throw new Error(`Qwen daemon request timed out after ${timeoutMs} ms: ${path}`);
             }
             throw error;
         } finally {
@@ -35,17 +38,21 @@ export class QwenDaemonClient {
         }
     }
 
-    async health() { return this.request("/health"); }
-    async capabilities() { return this.request("/capabilities"); }
+    async health() {
+        return this.request("/health");
+    }
+
+    async capabilities() {
+        return this.request("/capabilities");
+    }
 
     async createSession() {
-        const payload = {
-            sessionScope: "thread"
-        };
+        console.log("[QwenDaemonClient] createSession: POST /session");
 
-        // By default, let qwen serve select its bound/registered runtime.
-        // Explicit workspace selection is opt-in because an HTTP-bridge
-        // daemon may be bound to one workspace and reject another.
+        const payload = {};
+
+        // By default, use the workspace already bound by qwen serve.
+        // Explicit workspace selection is opt-in.
         if (this.requestWorkspace && this.workspaceCwd) {
             payload.cwd = this.workspaceCwd;
         }
@@ -54,10 +61,15 @@ export class QwenDaemonClient {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(payload)
-        });
+        }, this.sessionTimeoutMs);
 
         if (!result?.sessionId) {
             throw new Error(`Qwen daemon returned an invalid session response: ${JSON.stringify(result)}`);
+        }
+
+        console.log(`[QwenDaemonClient] createSession: OK sessionId=${result.sessionId}`);
+        if (result.workspaceCwd) {
+            console.log(`[QwenDaemonClient] session workspace=${result.workspaceCwd}`);
         }
 
         return result;
@@ -66,18 +78,21 @@ export class QwenDaemonClient {
     async sendPrompt(sessionId, prompt) {
         if (!sessionId) throw new Error("sessionId is required.");
         if (typeof prompt !== "string" || prompt.length === 0) throw new Error("prompt must be a non-empty string.");
-        return this.request(`/session/${encodeURIComponent(sessionId)}/prompt`, {
+        console.log(`[QwenDaemonClient] sendPrompt: sessionId=${sessionId}, promptLength=${prompt.length}`);
+        const result = await this.request(`/session/${encodeURIComponent(sessionId)}/prompt`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ prompt: [{ type: "text", text: prompt }] })
         });
+        console.log(`[QwenDaemonClient] sendPrompt: OK promptId=${result?.promptId ?? "(none)"}`);
+        return result;
     }
 
     async cancelActivePrompt(sessionId) {
         if (!sessionId) throw new Error("sessionId is required.");
 
         const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), Math.min(this.timeoutMs, 10000));
+        const timeout = setTimeout(() => controller.abort(), 10000);
 
         try {
             const response = await fetch(
@@ -101,6 +116,7 @@ export class QwenDaemonClient {
 
     async connectEvents(sessionId, onEvent, { signal, onConnected } = {}) {
         if (!sessionId) throw new Error("sessionId is required.");
+        console.log(`[QwenDaemonClient] connectEvents: GET /session/${sessionId}/events`);
         const response = await fetch(`${this.baseUrl}/session/${encodeURIComponent(sessionId)}/events`, {
             headers: { Accept: "text/event-stream" },
             signal
@@ -117,6 +133,7 @@ export class QwenDaemonClient {
         let currentEvent = { id: null, event: "message", data: [] };
 
         if (onConnected) await onConnected();
+        console.log(`[QwenDaemonClient] connectEvents: SSE connected for sessionId=${sessionId}`);
 
         const dispatch = async () => {
             if (currentEvent.data.length === 0) {
@@ -257,7 +274,7 @@ export class QwenDaemonClient {
         try {
             while (!connected) {
                 if (streamError) throw streamError;
-                await new Promise(resolve => setTimeout(resolve, 1));
+                await new Promise(resolve => setTimeout(resolve, 10));
             }
 
             const promptResult = await this.sendPrompt(sessionId, prompt);
@@ -287,7 +304,9 @@ export class QwenDaemonClient {
     }
 
     async run(prompt) {
+        console.log("[QwenDaemonClient] run: creating session");
         const session = await this.createSession();
+        console.log(`[QwenDaemonClient] run: collecting turn for sessionId=${session.sessionId}`);
         return this.collectTurn(session.sessionId, prompt);
     }
 }
