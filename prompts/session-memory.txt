@@ -1,0 +1,189 @@
+## 2026/08/22 19:16:44
+
+### QUESTION
+C#でList<int>から重複を削除する方法を1つだけ教えてください。
+
+### FINAL ANSWER
+LINQの `Distinct` メソッドを使用する方法です。
+
+```csharp
+using System.Linq;
+
+List<int> numbers = new List<int> { 1, 2, 2, 3, 4, 4, 5 };
+List<int> uniqueNumbers = numbers.Distinct().ToList();
+```
+
+---
+## MEMORY-0001
+DATE: 2026/08/23 16:03:43
+
+### QUESTION
+C#でList<int>から重複を削除する方法を1つだけ教えてください。
+
+### FINAL ANSWER
+LINQの `Distinct()` メソッドを使用する方法です。
+
+```csharp
+using System.Collections.Generic;
+using System.Linq;
+
+List<int> numbers = new List<int> { 1, 2, 2, 3, 4, 4, 5 };
+
+// 重複を削除して新しいリストを作成
+List<int> distinctNumbers = numbers.Distinct().ToList();
+```
+
+---
+## MEMORY-0002
+DATE: 2026/08/23 16:11:49
+
+### QUESTION
+MEMORY-0001を参照して回答してください。C#のDistinctについてもう少し詳しく教えて。
+
+### FINAL ANSWER
+MEMORY-0001の内容を踏まえ、C#の `Distinct()` メソッドについて詳しく解説します。
+
+`Distinct()` は、LINQ（`System.Linq`）で提供されているコレクション（シーケンス）から重複要素を排除するメソッドです。主な特徴と詳細な使い方は以下の通りです。
+
+---
+
+### 1. 基本的な仕組み
+- **デフォルトの等値比較**: 既定では `EqualityComparer<T>.Default` を使用して要素の同一性を判定します（`int` や `string` などの基本型は値ベースで比較されます）。
+- **遅延評価（Deferred Execution）**: `Distinct()` を呼び出した時点では評価されず、`foreach` で反復処理されたり `ToList()` などで結果が取り出される際に初めて実行されます。
+- **出現順序の保持**: 元のシーケンスで最初に出現した要素の順序がそのまま維持されます。
+
+---
+
+### 2. カスタムオブジェクト（参照型）での重複削除
+自作クラスなどの参照型では、既定で「参照先（メモリアドレス）」が比較対象となるため、プロパティ値が同じでも異なるインスタンスであれば重複とみなされません。
+
+特定のプロパティやカスタム条件で重複を排除したい場合は、主に以下の方法を使用します。
+
+#### 方法A: `DistinctBy` を使用する（.NET 6 以降推奨）
+キーとなるプロパティをラムダ式で直接指定できます。
+
+```csharp
+var users = new List<User>
+{
+    new User { Id = 1, Name = "Alice" },
+    new User { Id = 1, Name = "Alice" },
+    new User { Id = 2, Name = "Bob" }
+};
+
+// Idプロパティを基準に重複を削除
+var uniqueUsers = users.DistinctBy(u => u.Id).ToList();
+```
+
+#### 方法B: `IEqualityComparer<T>` を渡す
+比較ロジックを実装したクラスを作成し、引数に渡します。
+
+```csharp
+public class UserComparer : IEqualityComparer<User>
+{
+    public bool Equals(User x, User y) => x?.Id == y?.Id;
+    public int GetHashCode(User obj) => obj?.Id.GetHashCode() ?? 0;
+}
+
+// 比較子を指定して実行
+var uniqueUsers = users.Distinct(new UserComparer()).ToList();
+```
+*(※クラス自体に `IEquatable<T>` を実装するか、`Equals` と `GetHashCode` をオーバーライドして既定の比較動作を変更する方法もあります。)*
+
+---
+## MEMORY-0003
+DATE: 2026/08/23 16:23:09
+
+### QUESTION
+MEMORY-0001を参照して回答してください。C#のDistinctについてもう少し詳しく教えて。
+
+### FINAL ANSWER
+C#のLINQメソッド `Distinct()` の主な特徴と仕様は以下のとおりです。
+
+### 1. 動作の仕組み
+* **既定の等値比較**: 数値や文字列などの基本型は、値そのものを比較して重複を判定します（内部的には `EqualityComparer<T>.Default` を使用）。
+* **非破壊的**: 元のコレクションは変更せず、重複を除いた新しいシーケンス（`IEnumerable<T>`）を返します。
+* **遅延評価**: `Distinct()` を呼び出した時点では処理されず、`ToList()` や `foreach` などで実際に列挙されたタイミングで処理が実行されます。
+
+### 2. 自作クラス（参照型）を扱う場合の注意点
+自作クラスのインスタンスは、デフォルトでは「参照（メモリアドレス）」で比較されるため、プロパティの値が同じでも別インスタンスであれば重複とみなされません。
+
+クラス内の値で重複判定させたい場合は、以下のいずれかの方法を取ります。
+
+* **方法A：`IEqualityComparer<T>` を指定する**
+  ```csharp
+  var uniqueList = list.Distinct(new CustomComparer()).ToList();
+  ```
+* **方法B：クラス側で `Equals` と `GetHashCode` をオーバーライドする**
+* **方法C：`DistinctBy` を使用する（.NET 6以降）**
+  特定のプロパティを基準に重複排除が可能です。
+  ```csharp
+  // Idプロパティで重複を排除する例
+  var uniqueList = list.DistinctBy(x => x.Id).ToList();
+  ```
+
+---
+## MEMORY-0004
+DATE: 2026/08/23 16:33:41
+
+### QUESTION
+MEMORY-0001を参照して回答してください。C#のDistinctについてもう少し詳しく教えて。
+
+### FINAL ANSWER
+`MEMORY-0001` を踏まえ、C# の `Distinct()` メソッドについて詳しく解説します。
+
+`Distinct()` は、LINQ（`System.Linq`）で提供される拡張メソッドで、シーケンス（リストや配列など）から重複する要素を取り除いた一意な要素のシーケンスを返します。
+
+主な特徴と使い方は以下の通りです。
+
+---
+
+### 1. 動作の仕組み
+* **デフォルトの比較:** 既定では `EqualityComparer<T>.Default` を使用して等価性を判定します（`int` や `string` などの基本型はそのまま値で比較されます）。
+* **順序の保持:** 重複する要素のうち、最初に出現した要素の順序が維持されます。
+* **遅延評価:** `Distinct()` を呼び出した時点では処理は実行されず、`foreach` で反復処理したり `ToList()` などを呼んだタイミングで評価されます。
+
+---
+
+### 2. カスタムクラス（オブジェクト）での利用
+自作クラスのインスタンスを重複排除する場合、デフォルトでは「参照（同一インスタンスか）」で比較されるため、プロパティの値で比較したい場合は以下のいずれかの対応が必要です。
+
+#### A. `IEqualityComparer<T>` を渡す
+`Distinct()` のオーバーロードにカスタムの比較クラスを渡します。`null` の処理も考慮して実装します。
+
+```csharp
+public class Person
+{
+    public int Id { get; set; }
+    public string Name { get; set; }
+}
+
+public class PersonComparer : IEqualityComparer<Person>
+{
+    public bool Equals(Person? x, Person? y)
+    {
+        if (ReferenceEquals(x, y)) return true;
+        if (x is null || y is null) return false;
+        return x.Id == y.Id;
+    }
+
+    public int GetHashCode(Person? obj) => obj?.Id.GetHashCode() ?? 0;
+}
+
+// 使用例
+var uniquePeople = people.Distinct(new PersonComparer()).ToList();
+```
+
+#### B. クラス側で `Equals` と `GetHashCode` をオーバーライドする
+クラスに `IEquatable<T>` を実装するか、`record` 型（C# 9.0以降）を使用すると、自動的に値による比較が行われます。
+
+---
+
+### 補足: 特定のキーで重複排除したい場合（.NET 6以降）
+.NET 6以降では、プロパティを指定して直接重複排除できる `DistinctBy` メソッドも利用可能です。
+
+```csharp
+// Idプロパティを基準に重複を削除
+var uniquePeople = people.DistinctBy(p => p.Id).ToList();
+```
+
+---

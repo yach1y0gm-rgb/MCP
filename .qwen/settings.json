@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(type *)",
+      "Bash(dir *)",
+      "Bash(node *)",
+      "Bash(cd *)"
+    ]
+  },
+  "$version": 4
+}

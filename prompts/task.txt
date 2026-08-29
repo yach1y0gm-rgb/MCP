@@ -1,24 +1,51 @@
-REVIEW_REQUIRED
+今回の調査対象はPromptDictionaryプロジェクトではありません。
 
-原因:
-- Application.MainWindow は存在しない
-- IClipboard.SetText は存在しない
-- Avalonia 12では SetTextAsync
+Supervisor自身の実装を調査してください。
 
+Supervisorの実ファイルは以下です。
 
-前回の修正はBuildに失敗しました。
+E:\tools\AI\MCP\openrouter-supervisor.js
 
-監督AIの指摘:
+必ずこのファイルを直接読み取ってください。
 
-1. Application.MainWindow は存在しない
-2. IClipboard.SetText は存在しない
-3. Avalonia 12では SetTextAsync を使用する必要がある
-4. MainViewModelにもCS8602が5件残っている
+併せて必要に応じて以下も確認してください。
 
-上記を確認して修正してください。
+E:\tools\AI\MCP\prompts\openrouter-supervisor.txt
+E:\tools\AI\MCP\prompts\task.txt
 
-勝手に別方式へ変更せず、
-既存のMVVM/DI設計を維持してください。
+今回の作業ではコード変更禁止。
+dotnet build禁止。
 
-修正後、必ずdotnet buildを実行してください。
+以下を実ファイルから確認してください。
 
+1. runQwen() の完全な実装
+2. runCommand() の完全な実装
+3. main() のIterationループ
+4. Qwenプロセスの起動方法
+5. Qwenへの入力方法
+6. stdout/stderr取得方法
+7. Qwenプロセス終了条件
+8. tempファイル生成・削除
+9. Iteration間でQwenが再起動される箇所
+10. MAX_ITERATIONSの処理
+
+さらに、現在の実装を前提として、
+
+A. 1タスク中Qwenプロセスを維持する方式
+B. IterationごとにQwenを再起動する現方式
+
+を比較してください。
+
+特に以下を評価してください。
+
+- Qwenプロセス維持によるメモリ使用量
+- Supervisor自身のCPU/メモリ負荷
+- stdout/stderr待機によるデッドロックリスク
+- Qwen CLIが継続対話に対応できるか
+- Supervisorから追加指示を送る方法
+- Graceful Shutdownとの両立
+- 1時間制限との両立
+- 異常終了時の復旧方法
+
+推測は禁止。
+実ファイルと実行方法を確認した上で報告してください。

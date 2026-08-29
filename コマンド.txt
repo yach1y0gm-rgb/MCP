@@ -1,2 +1,6 @@
 node "E:\tools\AI\MCP\gemini-supervisor.js"
 node "E:\tools\AI\MCP\openrouter-supervisor.js"
+node --check "E:\tools\AI\MCP\openrouter-supervisor.js"
+node "E:\tools\AI\MCP\ai-review.js" MEMORY-0001を参照して回答してください。C#のDistinctについてもう少し詳しく教えて。
+
+実装変更禁止。現在のE:\tools\AI\MCP\openrouter-supervisor.jsとE:\tools\AI\MCP\prompts\SUPERVISOR_DESIGN.mdの差分を調査して報告
