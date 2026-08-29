@@ -9,6 +9,10 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const PROJECT_ROOT = "E:\\tools\\AI\\project\\PromptDictionary";
 const QWEN_DAEMON_URL = "http://127.0.0.1:4170";
+const QWEN_COMMAND = process.env.QWEN_COMMAND || "qwen";
+const QWEN_DAEMON_TIMEOUT_MS = 60 * 60 * 1000;
+const QWEN_DAEMON_START_TIMEOUT_MS = 60000;
+const QWEN_DAEMON_POLL_INTERVAL_MS = 1000;
 const PROMPT_DIR = path.join(__dirname, "prompts");
 const SUPERVISOR_PROMPT_FILE = path.join(PROMPT_DIR, "openrouter-supervisor.txt");
 const TASK_FILE = path.join(PROMPT_DIR, "task.txt");
@@ -28,8 +32,7 @@ if (!apiKey) {
 
 const qwenClient = new QwenDaemonClient({
     baseUrl: QWEN_DAEMON_URL,
-    timeoutMs: 120000,
-    workspaceCwd: PROJECT_ROOT
+    timeoutMs: QWEN_DAEMON_TIMEOUT_MS
 });
 
 async function readPromptFile(filePath) {
@@ -52,6 +55,60 @@ function limitText(text, maxChars) {
     if (!text) return "";
     if (text.length <= maxChars) return text;
     return [text.slice(0, maxChars), "", `[TRUNCATED: original ${text.length} chars]`].join("\n");
+}
+
+async function ensureQwenDaemon() {
+    console.log("\n===== Qwen Daemon =====");
+
+    try {
+        const capabilities = await qwenClient.capabilities();
+        if (capabilities?.mode === "http-bridge") {
+            console.log(`Qwen daemon already running at ${QWEN_DAEMON_URL}`);
+            return;
+        }
+
+        console.log("Qwen daemon responded, but mode is not http-bridge. Attempting to start HTTP bridge.");
+    } catch {
+        console.log("Qwen daemon is not available. Starting qwen serve --http-bridge...");
+    }
+
+    let child;
+    try {
+        child = spawn(
+            QWEN_COMMAND,
+            ["serve", "--http-bridge"],
+            {
+                cwd: __dirname,
+                detached: true,
+                windowsHide: true,
+                shell: true,
+                stdio: "ignore"
+            }
+        );
+        child.unref();
+    } catch (error) {
+        throw new Error(`Failed to start qwen serve --http-bridge: ${error.message}`);
+    }
+
+    const deadline = Date.now() + QWEN_DAEMON_START_TIMEOUT_MS;
+
+    while (Date.now() < deadline) {
+        try {
+            const health = await qwenClient.health();
+            const capabilities = await qwenClient.capabilities();
+
+            if (health?.status === "ok" && capabilities?.mode === "http-bridge") {
+                console.log("Qwen daemon is ready.");
+                return;
+            }
+        } catch {
+            // Daemon is still starting.
+        }
+
+        await new Promise(resolve => setTimeout(resolve, QWEN_DAEMON_POLL_INTERVAL_MS));
+    }
+
+    throw new Error(`Qwen daemon did not become ready within ${QWEN_DAEMON_START_TIMEOUT_MS} ms.`);
 }
 
 async function runCommand(command, args) {
@@ -286,6 +343,8 @@ async function main() {
         console.log("========================================");
         console.log(" OpenRouter Supervisor");
         console.log("========================================\n");
+
+        await ensureQwenDaemon();
 
         const supervisorTemplate = await readPromptFile(SUPERVISOR_PROMPT_FILE);
         const task = (await readPromptFile(TASK_FILE)).trim();
