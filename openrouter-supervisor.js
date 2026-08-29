@@ -32,7 +32,8 @@ if (!apiKey) {
 
 const qwenClient = new QwenDaemonClient({
     baseUrl: QWEN_DAEMON_URL,
-    timeoutMs: QWEN_DAEMON_TIMEOUT_MS
+    timeoutMs: QWEN_DAEMON_TIMEOUT_MS,
+    workspaceCwd: __dirname
 });
 
 async function readPromptFile(filePath) {
@@ -66,7 +67,6 @@ async function ensureQwenDaemon() {
             console.log(`Qwen daemon already running at ${QWEN_DAEMON_URL}`);
             return;
         }
-
         console.log("Qwen daemon responded, but mode is not http-bridge. Attempting to start HTTP bridge.");
     } catch {
         console.log("Qwen daemon is not available. Starting qwen serve --http-bridge...");
@@ -74,29 +74,23 @@ async function ensureQwenDaemon() {
 
     let child;
     try {
-        child = spawn(
-            QWEN_COMMAND,
-            ["serve", "--http-bridge"],
-            {
-                cwd: __dirname,
-                detached: true,
-                windowsHide: true,
-                shell: true,
-                stdio: "ignore"
-            }
-        );
+        child = spawn(QWEN_COMMAND, ["serve", "--http-bridge"], {
+            cwd: __dirname,
+            detached: true,
+            windowsHide: true,
+            shell: true,
+            stdio: "ignore"
+        });
         child.unref();
     } catch (error) {
         throw new Error(`Failed to start qwen serve --http-bridge: ${error.message}`);
     }
 
     const deadline = Date.now() + QWEN_DAEMON_START_TIMEOUT_MS;
-
     while (Date.now() < deadline) {
         try {
             const health = await qwenClient.health();
             const capabilities = await qwenClient.capabilities();
-
             if (health?.status === "ok" && capabilities?.mode === "http-bridge") {
                 console.log("Qwen daemon is ready.");
                 return;
@@ -104,20 +98,14 @@ async function ensureQwenDaemon() {
         } catch {
             // Daemon is still starting.
         }
-
         await new Promise(resolve => setTimeout(resolve, QWEN_DAEMON_POLL_INTERVAL_MS));
     }
-
     throw new Error(`Qwen daemon did not become ready within ${QWEN_DAEMON_START_TIMEOUT_MS} ms.`);
 }
 
 async function runCommand(command, args) {
     return await new Promise((resolve, reject) => {
-        const child = spawn(command, args, {
-            cwd: PROJECT_ROOT,
-            windowsHide: true,
-            shell: true
-        });
+        const child = spawn(command, args, { cwd: PROJECT_ROOT, windowsHide: true, shell: true });
         let stdout = "";
         let stderr = "";
         child.stdout.setEncoding("utf8");
@@ -144,12 +132,8 @@ async function runQwen(prompt) {
 }
 
 async function reviewWithOpenRouter(prompt) {
-    const body = JSON.stringify({
-        model: MODEL,
-        messages: [{ role: "user", content: prompt }]
-    });
+    const body = JSON.stringify({ model: MODEL, messages: [{ role: "user", content: prompt }] });
     let lastError = null;
-
     for (let attempt = 1; attempt <= OPENROUTER_MAX_RETRIES; attempt++) {
         try {
             console.log(`Supervisor API attempt ${attempt}/${OPENROUTER_MAX_RETRIES}`);
@@ -207,7 +191,6 @@ async function runSupervisorReview({ supervisorTemplate, task, qwenResult, build
     });
 
     console.log(`Supervisor prompt size: ${supervisorPrompt.length} chars`);
-
     let lastError = null;
     for (let attempt = 1; attempt <= 3; attempt++) {
         try {
@@ -254,7 +237,6 @@ function parseSupervisorDecision(reviewText, buildRequired, buildExitCode) {
             continue: true
         };
     }
-
     if (parsed.decision !== "PASS" && parsed.decision !== "FIX") {
         return {
             ...parsed,
@@ -264,7 +246,6 @@ function parseSupervisorDecision(reviewText, buildRequired, buildExitCode) {
             continue: true
         };
     }
-
     if (buildRequired && buildExitCode !== 0 && parsed.decision === "PASS") {
         return {
             ...parsed,
@@ -284,15 +265,7 @@ async function runBuild() {
     if (result.stderr) console.error(result.stderr);
     return {
         code: result.code,
-        text: [
-            `Exit code: ${result.code}`,
-            "",
-            "STDOUT:",
-            limitText(result.stdout, MAX_BUILD_RESULT_CHARS),
-            "",
-            "STDERR:",
-            limitText(result.stderr, MAX_BUILD_RESULT_CHARS)
-        ].join("\n")
+        text: [`Exit code: ${result.code}`, "", "STDOUT:", limitText(result.stdout, MAX_BUILD_RESULT_CHARS), "", "STDERR:", limitText(result.stderr, MAX_BUILD_RESULT_CHARS)].join("\n")
     };
 }
 
@@ -307,9 +280,7 @@ async function notifyCompletion() {
 }
 
 function createFixQwenPrompt({ task, decision, buildText }) {
-    const instructions = Array.isArray(decision.instructions)
-        ? decision.instructions
-        : [decision.summary ?? "問題を調査して修正してください。"];
+    const instructions = Array.isArray(decision.instructions) ? decision.instructions : [decision.summary ?? "問題を調査して修正してください。"];
     return [
         "前回の作業についてSupervisorから修正指示が出ています。",
         "",
@@ -334,7 +305,7 @@ function createFixQwenPrompt({ task, decision, buildText }) {
         "Taskでコード変更が禁止されている場合、ファイルを変更しないでください。",
         "TaskでBuildが禁止されている場合、Buildを実行しないでください。",
         "Taskに明示されていない変更・改善・リファクタリングを行わないでください。",
-        "作業完了後、実施内容と結果を日本語で報告してください。"
+        "作業完了後、実施内容と結果を日本語で報告してください."
     ].join("\n");
 }
 
@@ -363,25 +334,23 @@ async function main() {
             "===== Task =====",
             task,
             "",
+            "===== 実行開始時の最優先手順 =====",
+            "これはE:\\tools\\AI\\MCP workspace上の調査Taskです。",
+            "まず次の実ファイルを直接読み取ってください。",
+            "1. E:\\tools\\AI\\MCP\\openrouter-supervisor.js",
+            "2. E:\\tools\\AI\\MCP\\prompts\\openrouter-supervisor.txt",
+            "3. E:\\tools\\AI\\MCP\\prompts\\task.txt",
+            "上記3ファイル以外のメモリファイル、過去のAI Review資料、PromptDictionary側ファイルを先に参照しないでください。",
+            "特に .qwen のmemory配下にある ai-review.js などは今回の調査対象ではありません。",
+            "必ず上記の実ファイルの内容を確認した後、その内容だけを根拠に調査結果をまとめてください。",
+            "",
             "===== 最重要ルール =====",
             "Task本文に明示された禁止事項を最優先してください。",
-            "",
-            "Taskでコード変更禁止と指定されている場合、",
-            "ファイル編集・削除・生成を一切行わないでください。",
-            "",
-            "TaskでBuild禁止と指定されている場合、",
-            "Buildを実行しないでください。",
-            "",
             "Taskに明示されていない変更・改善・リファクタリングを行わないでください。",
-            "",
-            "調査Taskの場合は、実ファイルを直接確認し、",
-            "確認できた事実と推測を明確に分離してください。",
-            "",
+            "調査Taskの場合は、実ファイルを直接確認し、確認できた事実と推測を明確に分離してください。",
             "推測だけでAPI・型・ライブラリ仕様を判断しないでください。",
             "",
             "===== 作業完了時の報告 =====",
-            "以下の形式で日本語報告してください。",
-            "",
             "変更ファイル:",
             "-",
             "",
@@ -420,15 +389,7 @@ async function main() {
             const gitDiffText = await getGitDiff();
 
             console.log("\n===== Nemotron Supervisor =====\n");
-            const review = await runSupervisorReview({
-                supervisorTemplate,
-                task,
-                qwenResult,
-                buildRequired,
-                buildText: build.text,
-                gitDiff: gitDiffText,
-                iteration
-            });
+            const review = await runSupervisorReview({ supervisorTemplate, task, qwenResult, buildRequired, buildText: build.text, gitDiff: gitDiffText, iteration });
 
             console.log("\nReview Result:");
             console.log(review.text);
