@@ -58,9 +58,6 @@ export class QwenDaemonClient {
         console.log("[QwenDaemonClient] createSession: POST /session");
 
         const payload = {};
-
-        // By default, use the workspace already bound by qwen serve.
-        // Explicit workspace selection is opt-in.
         if (this.requestWorkspace && this.workspaceCwd) {
             payload.cwd = this.workspaceCwd;
         }
@@ -99,13 +96,11 @@ export class QwenDaemonClient {
     async respondToPermission(requestId, outcome) {
         if (!requestId) throw new Error("requestId is required.");
 
-        const result = await this.request(`/permission/${encodeURIComponent(requestId)}`, {
+        return this.request(`/permission/${encodeURIComponent(requestId)}`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ outcome })
         }, 10000);
-
-        return result ?? {};
     }
 
     extractToolName(permissionRequest) {
@@ -120,7 +115,6 @@ export class QwenDaemonClient {
     async handlePermissionRequest(permissionRequest) {
         const requestId = permissionRequest?.data?.requestId ?? permissionRequest?.requestId;
         const options = permissionRequest?.data?.options ?? permissionRequest?.options ?? [];
-        const toolCall = permissionRequest?.data?.toolCall ?? permissionRequest?.toolCall;
         const toolName = this.extractToolName(permissionRequest);
 
         if (!requestId) {
@@ -129,6 +123,7 @@ export class QwenDaemonClient {
         }
 
         console.log(`[QwenDaemonClient] permission_request: tool=${toolName ?? "(unknown)"}, requestId=${requestId}`);
+        console.log(`[QwenDaemonClient] permission_request options=${JSON.stringify(options)}`);
 
         const allowed = toolName && this.autoApproveTools.has(toolName);
         const choice = allowed
@@ -139,35 +134,27 @@ export class QwenDaemonClient {
                 ?? options.find(option => option?.kind === "deny_once")
                 ?? options.find(option => option?.kind === "reject_always");
 
-        if (choice?.id) {
-            const outcome = {
-                outcome: "selected",
-                optionId: choice.id
-            };
-            console.log(`[QwenDaemonClient] permission ${allowed ? "ALLOW" : "REJECT"}: tool=${toolName ?? "(unknown)"}, option=${choice.id}`);
-            try {
-                await this.respondToPermission(requestId, outcome);
-            } catch (error) {
-                // Another connected client may have responded first.
-                if (/HTTP 404/.test(error.message)) {
-                    console.log(`[QwenDaemonClient] permission already resolved: requestId=${requestId}`);
-                    return;
-                }
-                throw error;
-            }
+        if (!choice?.id) {
+            console.warn(`[QwenDaemonClient] no suitable permission option for tool=${toolName ?? "(unknown)"}`);
             return;
         }
 
-        console.warn(`[QwenDaemonClient] no suitable permission option for tool=${toolName ?? "(unknown)"}; cancelling request.`);
+        const outcome = {
+            outcome: "selected",
+            optionId: choice.id
+        };
+
+        console.log(`[QwenDaemonClient] permission ${allowed ? "ALLOW" : "REJECT"}: tool=${toolName ?? "(unknown)"}, option=${choice.id}`);
+
         try {
-            await this.respondToPermission(requestId, { outcome: "cancelled" });
+            await this.respondToPermission(requestId, outcome);
         } catch (error) {
-            if (/HTTP 404/.test(error.message)) return;
+            if (/HTTP 404/.test(error.message)) {
+                console.log(`[QwenDaemonClient] permission already resolved: requestId=${requestId}`);
+                return;
+            }
             throw error;
         }
-
-        // Keep the value available to make diagnostics explicit when debugging.
-        void toolCall;
     }
 
     async cancelActivePrompt(sessionId) {
@@ -306,13 +293,15 @@ export class QwenDaemonClient {
             const payload = event.parsed;
             if (!payload) return;
 
-            if (event.event === "permission_request") {
+            // Qwen HTTP bridge emits permission requests as session_update
+            // events whose data.update.sessionUpdate is permission_request.
+            const update = payload.data?.update ?? payload.update ?? payload;
+            const sessionUpdate = update?.sessionUpdate ?? payload.sessionUpdate;
+
+            if (sessionUpdate === "permission_request") {
                 await this.handlePermissionRequest(payload);
                 return;
             }
-
-            const update = payload.data?.update ?? payload.update ?? payload;
-            const sessionUpdate = update?.sessionUpdate ?? payload.sessionUpdate;
 
             if (sessionUpdate === "agent_message_chunk") {
                 const text = update?.content?.text ?? payload.content?.text;
