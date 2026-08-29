@@ -60,7 +60,6 @@ function limitText(text, maxChars) {
 
 async function ensureQwenDaemon() {
     console.log("\n===== Qwen Daemon =====");
-
     try {
         const capabilities = await qwenClient.capabilities();
         if (capabilities?.mode === "http-bridge") {
@@ -72,9 +71,8 @@ async function ensureQwenDaemon() {
         console.log("Qwen daemon is not available. Starting qwen serve --http-bridge...");
     }
 
-    let child;
     try {
-        child = spawn(QWEN_COMMAND, ["serve", "--http-bridge"], {
+        const child = spawn(QWEN_COMMAND, ["serve", "--http-bridge"], {
             cwd: __dirname,
             detached: true,
             windowsHide: true,
@@ -123,6 +121,10 @@ async function runQwen(prompt) {
         const result = await qwenClient.run(prompt);
         console.log(`Qwen stopReason: ${result.stopReason ?? "(none)"}`);
         console.log(`Qwen response length: ${result.response.length} chars`);
+        if (result.diagnostics) {
+            const d = result.diagnostics;
+            console.log(`Qwen diagnostics: events=${d.totalEvents}, agentChunks=${d.agentMessageChunks}, responseChars=${d.agentMessageChars}, toolCalls=${d.toolCallEvents}, permissions=${d.permissionRequests}, turnComplete=${d.turnComplete}, durationMs=${d.lastEventAt && d.firstEventAt ? d.lastEventAt - d.firstEventAt : "(n/a)"}`);
+        }
         return result.response;
     } catch (error) {
         console.error("\n===== Qwen execution failed =====\n");
@@ -222,7 +224,7 @@ async function runSupervisorReview({ supervisorTemplate, task, qwenResult, build
     throw lastError;
 }
 
-function parseSupervisorDecision(reviewText, buildRequired, buildExitCode) {
+function parseSupervisorDecision(reviewText, buildRequired, buildExitCode, qwenResult) {
     let parsed;
     try {
         parsed = JSON.parse(reviewText.replace(/^```json\s*/i, "").replace(/\s*```$/i, "").trim());
@@ -237,6 +239,7 @@ function parseSupervisorDecision(reviewText, buildRequired, buildExitCode) {
             continue: true
         };
     }
+
     if (parsed.decision !== "PASS" && parsed.decision !== "FIX") {
         return {
             ...parsed,
@@ -246,6 +249,21 @@ function parseSupervisorDecision(reviewText, buildRequired, buildExitCode) {
             continue: true
         };
     }
+
+    const qwenFailed = typeof qwenResult === "string" && /Qwen (?:execution failed|prompt cancelled|turn error)|timed out/i.test(qwenResult);
+    const qwenEmpty = !qwenResult || !qwenResult.trim();
+    if ((qwenFailed || qwenEmpty) && parsed.decision === "PASS") {
+        return {
+            ...parsed,
+            decision: "FIX",
+            summary: `${parsed.summary ?? ""}\nQwen実行が完了していないためPASSは禁止されています。${qwenFailed ? "Qwen実行エラー/キャンセルを検出しました。" : "Qwen結果が空です。"}`,
+            instructions: [
+                "Qwenの実行結果を確認し、Taskを完了させてください。"
+            ],
+            continue: true
+        };
+    }
+
     if (buildRequired && buildExitCode !== 0 && parsed.decision === "PASS") {
         return {
             ...parsed,
@@ -403,7 +421,7 @@ async function main() {
             console.log("Usage:");
             console.log(JSON.stringify(review.usage, null, 2));
 
-            const decision = parseSupervisorDecision(review.text, buildRequired, build.code);
+            const decision = parseSupervisorDecision(review.text, buildRequired, build.code, qwenResult);
             console.log("\n===== Supervisor Decision =====\n");
             console.log(JSON.stringify(decision, null, 2));
 
