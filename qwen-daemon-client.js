@@ -1,6 +1,12 @@
 const DEFAULT_BASE_URL = "http://127.0.0.1:4170";
 const DEFAULT_TIMEOUT_MS = 60 * 60 * 1000;
 const DEFAULT_SESSION_TIMEOUT_MS = 15000;
+const DEFAULT_AUTO_APPROVE_TOOLS = new Set([
+    "read_file",
+    "list_directory",
+    "glob",
+    "grep_search"
+]);
 
 export class QwenDaemonClient {
     constructor({
@@ -8,13 +14,15 @@ export class QwenDaemonClient {
         timeoutMs = DEFAULT_TIMEOUT_MS,
         sessionTimeoutMs = DEFAULT_SESSION_TIMEOUT_MS,
         workspaceCwd = null,
-        requestWorkspace = false
+        requestWorkspace = false,
+        autoApproveTools = DEFAULT_AUTO_APPROVE_TOOLS
     } = {}) {
         this.baseUrl = baseUrl.replace(/\/$/, "");
         this.timeoutMs = timeoutMs;
         this.sessionTimeoutMs = sessionTimeoutMs;
         this.workspaceCwd = workspaceCwd;
         this.requestWorkspace = requestWorkspace;
+        this.autoApproveTools = new Set(autoApproveTools);
     }
 
     async request(path, options = {}, timeoutMs = this.timeoutMs) {
@@ -86,6 +94,80 @@ export class QwenDaemonClient {
         });
         console.log(`[QwenDaemonClient] sendPrompt: OK promptId=${result?.promptId ?? "(none)"}`);
         return result;
+    }
+
+    async respondToPermission(requestId, outcome) {
+        if (!requestId) throw new Error("requestId is required.");
+
+        const result = await this.request(`/permission/${encodeURIComponent(requestId)}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ outcome })
+        }, 10000);
+
+        return result ?? {};
+    }
+
+    extractToolName(permissionRequest) {
+        const toolCall = permissionRequest?.data?.toolCall ?? permissionRequest?.toolCall;
+        return toolCall?.name
+            ?? toolCall?.toolName
+            ?? toolCall?.tool?.name
+            ?? toolCall?.kind
+            ?? null;
+    }
+
+    async handlePermissionRequest(permissionRequest) {
+        const requestId = permissionRequest?.data?.requestId ?? permissionRequest?.requestId;
+        const options = permissionRequest?.data?.options ?? permissionRequest?.options ?? [];
+        const toolCall = permissionRequest?.data?.toolCall ?? permissionRequest?.toolCall;
+        const toolName = this.extractToolName(permissionRequest);
+
+        if (!requestId) {
+            console.warn("[QwenDaemonClient] permission_request without requestId; ignoring.");
+            return;
+        }
+
+        console.log(`[QwenDaemonClient] permission_request: tool=${toolName ?? "(unknown)"}, requestId=${requestId}`);
+
+        const allowed = toolName && this.autoApproveTools.has(toolName);
+        const choice = allowed
+            ? options.find(option => option?.kind === "allow_once")
+                ?? options.find(option => option?.kind === "allow_always")
+                ?? options[0]
+            : options.find(option => option?.kind === "reject_once")
+                ?? options.find(option => option?.kind === "deny_once")
+                ?? options.find(option => option?.kind === "reject_always");
+
+        if (choice?.id) {
+            const outcome = {
+                outcome: "selected",
+                optionId: choice.id
+            };
+            console.log(`[QwenDaemonClient] permission ${allowed ? "ALLOW" : "REJECT"}: tool=${toolName ?? "(unknown)"}, option=${choice.id}`);
+            try {
+                await this.respondToPermission(requestId, outcome);
+            } catch (error) {
+                // Another connected client may have responded first.
+                if (/HTTP 404/.test(error.message)) {
+                    console.log(`[QwenDaemonClient] permission already resolved: requestId=${requestId}`);
+                    return;
+                }
+                throw error;
+            }
+            return;
+        }
+
+        console.warn(`[QwenDaemonClient] no suitable permission option for tool=${toolName ?? "(unknown)"}; cancelling request.`);
+        try {
+            await this.respondToPermission(requestId, { outcome: "cancelled" });
+        } catch (error) {
+            if (/HTTP 404/.test(error.message)) return;
+            throw error;
+        }
+
+        // Keep the value available to make diagnostics explicit when debugging.
+        void toolCall;
     }
 
     async cancelActivePrompt(sessionId) {
@@ -223,6 +305,11 @@ export class QwenDaemonClient {
         const eventPromise = this.connectEvents(sessionId, async event => {
             const payload = event.parsed;
             if (!payload) return;
+
+            if (event.event === "permission_request") {
+                await this.handlePermissionRequest(payload);
+                return;
+            }
 
             const update = payload.data?.update ?? payload.update ?? payload;
             const sessionUpdate = update?.sessionUpdate ?? payload.sessionUpdate;
