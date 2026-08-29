@@ -52,20 +52,11 @@ export class QwenDaemonClient {
 
     async createSession() {
         console.log("[QwenDaemonClient] createSession: checking capabilities");
-        let capabilities;
-        try {
-            capabilities = await this.capabilities();
-        } catch (error) {
-            throw new Error(`Qwen daemon capabilities check failed: ${error.message}`);
-        }
-
+        const capabilities = await this.capabilities();
         const features = new Set(capabilities?.features ?? []);
-        const canOverrideScope = features.has("session_scope_override");
-        const canOverrideId = features.has("session_id_override");
         const payload = {};
-
-        if (canOverrideScope) payload.sessionScope = "thread";
-        if (canOverrideId) payload.sessionId = randomUUID();
+        if (features.has("session_scope_override")) payload.sessionScope = "thread";
+        if (features.has("session_id_override")) payload.sessionId = randomUUID();
         if (this.requestWorkspace && this.workspaceCwd) payload.cwd = this.workspaceCwd;
 
         console.log(`[QwenDaemonClient] createSession: POST /session ${JSON.stringify(payload)}`);
@@ -78,7 +69,6 @@ export class QwenDaemonClient {
         if (!result?.sessionId) {
             throw new Error(`Qwen daemon returned an invalid session response: ${JSON.stringify(result)}`);
         }
-
         console.log(`[QwenDaemonClient] createSession: OK sessionId=${result.sessionId}, attached=${result.attached ?? "(unknown)"}`);
         if (result.workspaceCwd) console.log(`[QwenDaemonClient] session workspace=${result.workspaceCwd}`);
         return result;
@@ -115,21 +105,23 @@ export class QwenDaemonClient {
         const requestId = permissionRequest?.data?.requestId ?? permissionRequest?.requestId;
         const options = permissionRequest?.data?.options ?? permissionRequest?.options ?? [];
         const toolName = this.extractToolName(permissionRequest);
-
         if (!requestId) {
             console.warn("[QwenDaemonClient] permission_request without requestId; ignoring.");
             return;
         }
 
-        console.log(`[QwenDaemonClient] permission_request: tool=${toolName ?? "(unknown)"}, requestId=${requestId}`);
-
         const allowed = toolName && this.autoApproveTools.has(toolName);
         const choice = allowed
-            ? options.find(option => option?.kind === "allow_once") ?? options.find(option => option?.kind === "allow_always") ?? options[0]
-            : options.find(option => option?.kind === "reject_once") ?? options.find(option => option?.kind === "deny_once") ?? options.find(option => option?.kind === "reject_always");
+            ? options.find(option => option?.kind === "allow_once")
+                ?? options.find(option => option?.kind === "allow_always")
+                ?? options[0]
+            : options.find(option => option?.kind === "reject_once")
+                ?? options.find(option => option?.kind === "deny_once")
+                ?? options.find(option => option?.kind === "reject_always");
 
+        console.log(`[QwenDaemonClient] permission_request: tool=${toolName ?? "(unknown)"}, requestId=${requestId}`);
         if (!choice?.id) {
-            console.warn(`[QwenDaemonClient] no suitable permission option for tool=${toolName ?? "(unknown)"}; leaving request pending.`);
+            console.warn(`[QwenDaemonClient] no suitable permission option for tool=${toolName ?? "(unknown)"}`);
             return;
         }
 
@@ -147,26 +139,18 @@ export class QwenDaemonClient {
     }
 
     async cancelActivePrompt(sessionId) {
-        if (!sessionId) throw new Error("sessionId is required.");
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 10000);
-        try {
-            const response = await fetch(`${this.baseUrl}/session/${encodeURIComponent(sessionId)}/cancel`, { method: "POST", signal: controller.signal });
-            if (response.status === 204 || response.ok) return true;
-            const text = await response.text();
-            throw new Error(`Qwen daemon cancel HTTP ${response.status} ${response.statusText}: ${text}`);
-        } catch (error) {
-            if (error?.name === "AbortError") throw new Error(`Qwen daemon cancel timed out: ${sessionId}`);
-            throw error;
-        } finally {
-            clearTimeout(timeout);
-        }
+        const response = await fetch(`${this.baseUrl}/session/${encodeURIComponent(sessionId)}/cancel`, { method: "POST" });
+        if (response.status === 204 || response.ok) return true;
+        const text = await response.text();
+        throw new Error(`Qwen daemon cancel HTTP ${response.status} ${response.statusText}: ${text}`);
     }
 
     async connectEvents(sessionId, onEvent, { signal, onConnected } = {}) {
-        if (!sessionId) throw new Error("sessionId is required.");
         console.log(`[QwenDaemonClient] connectEvents: GET /session/${sessionId}/events`);
-        const response = await fetch(`${this.baseUrl}/session/${encodeURIComponent(sessionId)}/events`, { headers: { Accept: "text/event-stream" }, signal });
+        const response = await fetch(`${this.baseUrl}/session/${encodeURIComponent(sessionId)}/events`, {
+            headers: { Accept: "text/event-stream" },
+            signal
+        });
         if (!response.ok) {
             const text = await response.text();
             throw new Error(`Qwen daemon SSE HTTP ${response.status} ${response.statusText}: ${text}`);
@@ -177,7 +161,6 @@ export class QwenDaemonClient {
         const decoder = new TextDecoder();
         let buffer = "";
         let currentEvent = { id: null, event: "message", data: [] };
-
         if (onConnected) await onConnected();
         console.log(`[QwenDaemonClient] connectEvents: SSE connected for sessionId=${sessionId}`);
 
@@ -188,13 +171,11 @@ export class QwenDaemonClient {
             }
             const rawData = currentEvent.data.join("\n");
             const event = { id: currentEvent.id, event: currentEvent.event, data: rawData, parsed: null };
-            try { event.parsed = JSON.parse(rawData); } catch {}
-
+            try { event.parsed = JSON.parse(rawData); } catch { }
             const payload = event.parsed;
             const update = payload?.data?.update ?? payload?.update ?? payload;
             const logicalEvent = update?.sessionUpdate ?? payload?.sessionUpdate ?? null;
             console.log(`[QwenDaemonClient] SSE event: id=${event.id ?? "(none)"}, event=${event.event}, logical=${logicalEvent ?? "(none)"}`);
-
             await onEvent(event);
             currentEvent = { id: null, event: "message", data: [] };
         };
@@ -265,16 +246,10 @@ export class QwenDaemonClient {
         const eventPromise = this.connectEvents(sessionId, async event => {
             const payload = event.parsed;
             if (!payload) return;
-
-            if (event.event === "permission_request") {
-                await this.handlePermissionRequest(payload);
-                return;
-            }
-
             const update = payload.data?.update ?? payload.update ?? payload;
             const sessionUpdate = update?.sessionUpdate ?? payload.sessionUpdate;
 
-            if (sessionUpdate === "permission_request") {
+            if (event.event === "permission_request" || sessionUpdate === "permission_request") {
                 await this.handlePermissionRequest(payload);
                 return;
             }
@@ -284,7 +259,6 @@ export class QwenDaemonClient {
                 if (typeof text === "string") chunks.push(text);
                 updateUsage(payload, update);
             }
-
             if (sessionUpdate === "usage_update") updateUsage(payload, update);
             promptId = payload.promptId ?? update?.promptId ?? promptId;
 
@@ -292,6 +266,21 @@ export class QwenDaemonClient {
                 stopReason = payload.stopReason ?? payload.data?.stopReason ?? payload.data?.update?.stopReason ?? update?.stopReason ?? null;
                 turnComplete = true;
                 resolveTurn();
+                return;
+            }
+
+            if (event.event === "prompt_cancelled") {
+                const reason = payload.reason ?? payload.data?.reason ?? "prompt_cancelled";
+                streamError = new Error(`Qwen prompt cancelled: ${reason}`);
+                rejectTurn(streamError);
+                return;
+            }
+
+            if (event.event === "turn_error") {
+                const errorKind = payload.errorKind ?? payload.data?.errorKind ?? "turn_error";
+                const message = payload.message ?? payload.error ?? payload.data?.message ?? JSON.stringify(payload);
+                streamError = new Error(`Qwen turn error (${errorKind}): ${message}`);
+                rejectTurn(streamError);
             }
         }, { signal: controller.signal, onConnected: () => { connected = true; } }).catch(error => {
             streamError = error;
@@ -310,12 +299,10 @@ export class QwenDaemonClient {
                 if (streamError) throw streamError;
                 await new Promise(resolve => setTimeout(resolve, 10));
             }
-
             const promptResult = await this.sendPrompt(sessionId, prompt);
             promptId = promptResult?.promptId ?? promptId;
             await turnPromise;
             if (!turnComplete) throw new Error("Qwen turn ended without turn_complete.");
-
             return { response: chunks.join(""), promptId, stopReason, usage, turnComplete };
         } catch (error) {
             if (timedOut && streamError) throw streamError;
