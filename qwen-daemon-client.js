@@ -62,23 +62,13 @@ export class QwenDaemonClient {
         const features = new Set(capabilities?.features ?? []);
         const canOverrideScope = features.has("session_scope_override");
         const canOverrideId = features.has("session_id_override");
-
         const payload = {};
 
-        if (canOverrideScope) {
-            payload.sessionScope = "thread";
-        }
-
-        if (canOverrideId) {
-            payload.sessionId = randomUUID();
-        }
-
-        if (this.requestWorkspace && this.workspaceCwd) {
-            payload.cwd = this.workspaceCwd;
-        }
+        if (canOverrideScope) payload.sessionScope = "thread";
+        if (canOverrideId) payload.sessionId = randomUUID();
+        if (this.requestWorkspace && this.workspaceCwd) payload.cwd = this.workspaceCwd;
 
         console.log(`[QwenDaemonClient] createSession: POST /session ${JSON.stringify(payload)}`);
-
         const result = await this.request("/session", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -199,6 +189,12 @@ export class QwenDaemonClient {
             const rawData = currentEvent.data.join("\n");
             const event = { id: currentEvent.id, event: currentEvent.event, data: rawData, parsed: null };
             try { event.parsed = JSON.parse(rawData); } catch {}
+
+            const payload = event.parsed;
+            const update = payload?.data?.update ?? payload?.update ?? payload;
+            const logicalEvent = update?.sessionUpdate ?? payload?.sessionUpdate ?? null;
+            console.log(`[QwenDaemonClient] SSE event: id=${event.id ?? "(none)"}, event=${event.event}, logical=${logicalEvent ?? "(none)"}`);
+
             await onEvent(event);
             currentEvent = { id: null, event: "message", data: [] };
         };
@@ -278,7 +274,6 @@ export class QwenDaemonClient {
             const update = payload.data?.update ?? payload.update ?? payload;
             const sessionUpdate = update?.sessionUpdate ?? payload.sessionUpdate;
 
-            // Some bridge builds expose permission_request as a session_update envelope.
             if (sessionUpdate === "permission_request") {
                 await this.handlePermissionRequest(payload);
                 return;
@@ -291,7 +286,6 @@ export class QwenDaemonClient {
             }
 
             if (sessionUpdate === "usage_update") updateUsage(payload, update);
-
             promptId = payload.promptId ?? update?.promptId ?? promptId;
 
             if (event.event === "turn_complete") {
