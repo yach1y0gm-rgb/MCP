@@ -6,9 +6,7 @@ Supervisorの実ファイルは以下です。
 
 E:\tools\AI\MCP\openrouter-supervisor.js
 
-必ずこのファイルを直接読み取ってください。
-
-併せて必要に応じて以下も確認してください。
+併せて以下の2ファイルも必要な範囲だけ確認してください。
 
 E:\tools\AI\MCP\prompts\openrouter-supervisor.txt
 E:\tools\AI\MCP\prompts\task.txt
@@ -16,53 +14,14 @@ E:\tools\AI\MCP\prompts\task.txt
 今回の作業ではコード変更禁止。
 dotnet build禁止。
 
-## 重要: コンテキスト・ツール転送対策
+## 調査の完了条件
 
-このTaskでは、巨大なtool resultを発生させないことを最優先してください。
+このTaskは、grep_searchだけでは完了ではありません。
 
-### 必須の調査手順
+最終回答を返す前に、必ず実ファイルのコードをread_fileで確認し、以下10項目すべてについて具体的な事実を報告してください。
 
-1. 最初にgrep_searchで以下のシンボル・文字列の位置を特定してください。
-   - runQwen
-   - runCommand
-   - MAX_ITERATIONS
-   - for (
-   - while (
-   - spawn(
-   - stdin
-   - stdout
-   - stderr
-   - temp
-
-2. 位置が特定できたら、read_fileは必ず明示的な行範囲を指定してください。
-
-3. read_file 1回あたりの取得範囲は最大150行としてください。
-
-4. 行範囲を指定しないread_fileは禁止です。
-
-5. ファイル全体を読む必要がある場合も、150行以下のread_fileを複数回実行してください。
-
-6. 同じ行範囲を重複して取得しないでください。
-
-7. 300行・500行・1000行などの大きな範囲を1回で取得してはいけません。
-
-8. 取得したソースコードを回答本文へ大量に再掲してはいけません。
-   実装事実を短く要約してください。
-
-9. 必要な情報がgrep_searchだけで確認できる場合、read_fileを追加実行しないでください。
-
-10. コンテキスト使用量が増えてきた場合は、ただちに取得範囲をさらに小さくしてください。
-
-11. 一度に複数ファイルを大量取得しないでください。まずopenrouter-supervisor.jsを確認し、その後必要な範囲だけプロンプトファイルを確認してください。
-
-12. read_fileのtool call後に、取得結果が巨大そうな場合は追加のread_fileを実行せず、既に得られた情報だけを要約してください。
-
-## 調査対象
-
-以下を実ファイルから確認してください。
-
-1. runQwen() の完全な実装
-2. runCommand() の完全な実装
+1. runQwen() の実装
+2. runCommand() の実装
 3. main() のIterationループ
 4. Qwenプロセスの起動方法
 5. Qwenへの入力方法
@@ -72,15 +31,12 @@ dotnet build禁止。
 9. Iteration間でQwenが再起動される箇所
 10. MAX_ITERATIONSの処理
 
-さらに、現在の実装を前提として、
+さらに、以下のA/B比較を実ファイルの事実に基づいて完成させてください。
 
 A. 1タスク中Qwenプロセスを維持する方式
 B. IterationごとにQwenを再起動する現方式
 
-を比較してください。
-
-特に以下を評価してください。
-
+比較項目:
 - Qwenプロセス維持によるメモリ使用量
 - Supervisor自身のCPU/メモリ負荷
 - stdout/stderr待機によるデッドロックリスク
@@ -90,5 +46,58 @@ B. IterationごとにQwenを再起動する現方式
 - 1時間制限との両立
 - 異常終了時の復旧方法
 
+## ツール使用ルール
+
+巨大なtool resultを発生させないでください。
+
+1. 最初にgrep_searchで、runQwen、runCommand、MAX_ITERATIONS、spawn、stdin、stdout、stderr、temp、およびIterationループの位置を特定してください。
+
+2. grep_searchだけでは10項目を確認できないため、必ずread_fileを実行してください。
+
+3. read_fileは必ず明示的な行範囲を指定してください。
+
+4. read_file 1回あたりの取得範囲は最大150行です。
+
+5. 150行を超える範囲指定は禁止です。
+
+6. 同じ行範囲を重複して取得しないでください。
+
+7. 必要な範囲だけを取得してください。ファイル全体を一度に取得してはいけません。
+
+8. 1回のread_fileで複数の広い範囲を要求してはいけません。
+
+9. 取得したコードを最終回答へ大量に再掲せず、実装事実を要約してください。
+
+10. コンテキスト使用量が増えた場合は、150行より小さい範囲へ分割してください。
+
+## 必須実行順序
+
+Phase 1:
+grep_searchで対象シンボルの行位置を特定する。
+
+Phase 2:
+openrouter-supervisor.jsの必要箇所をread_fileで確認する。
+少なくともrunQwen、runCommand、mainループ、spawn/stdin/stdout/stderr、temp、MAX_ITERATIONSを確認する。
+
+Phase 3:
+openrouter-supervisor.txtとtask.txtは、A/B比較や実行条件の確認に必要な範囲だけread_fileで確認する。
+
+Phase 4:
+10項目すべてについて確認事実を整理し、A/B比較の8項目すべてを評価する。
+
+Phase 5:
+最終回答を日本語で作成する。
+
+## 重要
+
+Qwen自身の判断で調査を短縮してはいけません。
+
+grep_searchを実行しただけで完了扱いにしてはいけません。
+
+10項目すべてを確認し、A/B比較8項目まで報告できた時点で初めてTask完了です。
+
 推測は禁止。
-実ファイルと実行方法を確認した上で報告してください。
+実ファイルで確認できた事実を根拠にしてください。
+
+コード変更禁止。
+dotnet build禁止。
