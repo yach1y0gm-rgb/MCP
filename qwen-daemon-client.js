@@ -4,17 +4,29 @@ const DEFAULT_BASE_URL = "http://127.0.0.1:4170";
 const DEFAULT_TIMEOUT_MS = 60 * 60 * 1000;
 const DEFAULT_SESSION_TIMEOUT_MS = 15000;
 const DEFAULT_DIAGNOSTIC_RING_SIZE = 12;
-// Qwen 32K context reports a safe forwarding hard limit around 94.1%.
-// Keep a small margin, but do not abort ordinary turns as early as 86%.
 const DEFAULT_CONTEXT_SAFETY_RATIO = 0.92;
-const DEFAULT_MAX_CONTEXT_RETRIES = 1;
+const DEFAULT_MAX_RECOVERY_RETRIES = 2;
 
-export class QwenContextLimitError extends Error {
-    constructor(message, details = null) {
+export class QwenRecoverableError extends Error {
+    constructor(message, { code = "QWEN_RECOVERABLE", details = null } = {}) {
         super(message);
-        this.name = "QwenContextLimitError";
-        this.code = "QWEN_CONTEXT_LIMIT";
+        this.name = "QwenRecoverableError";
+        this.code = code;
         this.details = details;
+    }
+}
+
+export class QwenContextLimitError extends QwenRecoverableError {
+    constructor(message, details = null) {
+        super(message, { code: "QWEN_CONTEXT_LIMIT", details });
+        this.name = "QwenContextLimitError";
+    }
+}
+
+export class QwenForwardError extends QwenRecoverableError {
+    constructor(message, details = null) {
+        super(message, { code: "QWEN_FORWARD_FAILED", details });
+        this.name = "QwenForwardError";
     }
 }
 
@@ -28,13 +40,13 @@ export class QwenDaemonClient {
         autoApproveTools = new Set(["read_file", "list_directory", "glob", "grep_search"]),
         diagnosticRingSize = DEFAULT_DIAGNOSTIC_RING_SIZE,
         contextSafetyRatio = DEFAULT_CONTEXT_SAFETY_RATIO,
-        maxContextRetries = DEFAULT_MAX_CONTEXT_RETRIES
+        maxRecoveryRetries = DEFAULT_MAX_RECOVERY_RETRIES
     } = {}) {
         if (contextSafetyRatio <= 0 || contextSafetyRatio >= 1) {
             throw new Error("contextSafetyRatio must be greater than 0 and less than 1.");
         }
-        if (!Number.isInteger(maxContextRetries) || maxContextRetries < 0) {
-            throw new Error("maxContextRetries must be a non-negative integer.");
+        if (!Number.isInteger(maxRecoveryRetries) || maxRecoveryRetries < 0) {
+            throw new Error("maxRecoveryRetries must be a non-negative integer.");
         }
         this.baseUrl = baseUrl.replace(/\/$/, "");
         this.timeoutMs = timeoutMs;
@@ -44,7 +56,7 @@ export class QwenDaemonClient {
         this.autoApproveTools = new Set(autoApproveTools);
         this.diagnosticRingSize = diagnosticRingSize;
         this.contextSafetyRatio = contextSafetyRatio;
-        this.maxContextRetries = maxContextRetries;
+        this.maxRecoveryRetries = maxRecoveryRetries;
     }
 
     async request(path, options = {}, timeoutMs = this.timeoutMs) {
@@ -53,15 +65,11 @@ export class QwenDaemonClient {
         try {
             const response = await fetch(`${this.baseUrl}${path}`, { ...options, signal: controller.signal });
             const text = await response.text();
-            if (!response.ok) {
-                throw new Error(`Qwen daemon HTTP ${response.status} ${response.statusText}: ${text}`);
-            }
+            if (!response.ok) throw new Error(`Qwen daemon HTTP ${response.status} ${response.statusText}: ${text}`);
             if (!text) return null;
             try { return JSON.parse(text); } catch { return text; }
         } catch (error) {
-            if (error?.name === "AbortError") {
-                throw new Error(`Qwen daemon request timed out after ${timeoutMs} ms: ${path}`);
-            }
+            if (error?.name === "AbortError") throw new Error(`Qwen daemon request timed out after ${timeoutMs} ms: ${path}`);
             throw error;
         } finally {
             clearTimeout(timer);
@@ -85,9 +93,7 @@ export class QwenDaemonClient {
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(payload)
         }, this.sessionTimeoutMs);
-        if (!result?.sessionId) {
-            throw new Error(`Qwen daemon returned an invalid session response: ${JSON.stringify(result)}`);
-        }
+        if (!result?.sessionId) throw new Error(`Qwen daemon returned an invalid session response: ${JSON.stringify(result)}`);
         console.log(`[QwenDaemonClient] createSession: OK sessionId=${result.sessionId}, attached=${result.attached ?? "(unknown)"}`);
         if (result.workspaceCwd) console.log(`[QwenDaemonClient] session workspace=${result.workspaceCwd}`);
         return result;
@@ -130,12 +136,8 @@ export class QwenDaemonClient {
         }
         const allowed = Boolean(toolName && this.autoApproveTools.has(toolName));
         const choice = allowed
-            ? options.find(option => option?.kind === "allow_once")
-                ?? options.find(option => option?.kind === "allow_always")
-                ?? options[0]
-            : options.find(option => option?.kind === "reject_once")
-                ?? options.find(option => option?.kind === "deny_once")
-                ?? options.find(option => option?.kind === "reject_always");
+            ? options.find(option => option?.kind === "allow_once") ?? options.find(option => option?.kind === "allow_always") ?? options[0]
+            : options.find(option => option?.kind === "reject_once") ?? options.find(option => option?.kind === "deny_once") ?? options.find(option => option?.kind === "reject_always");
         console.log(`[QwenDaemonClient] permission_request: tool=${toolName ?? "(unknown)"}, requestId=${requestId}, allowed=${allowed}`);
         if (!choice?.id) {
             console.warn(`[QwenDaemonClient] no suitable permission option: tool=${toolName ?? "(unknown)"}`);
@@ -159,10 +161,7 @@ export class QwenDaemonClient {
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), 10000);
         try {
-            const response = await fetch(`${this.baseUrl}/session/${encodeURIComponent(sessionId)}/cancel`, {
-                method: "POST",
-                signal: controller.signal
-            });
+            const response = await fetch(`${this.baseUrl}/session/${encodeURIComponent(sessionId)}/cancel`, { method: "POST", signal: controller.signal });
             if (response.status === 204 || response.ok) return true;
             const text = await response.text();
             throw new Error(`Qwen daemon cancel HTTP ${response.status} ${response.statusText}: ${text}`);
@@ -177,21 +176,16 @@ export class QwenDaemonClient {
     async connectEvents(sessionId, onEvent, { signal, onConnected } = {}) {
         if (!sessionId) throw new Error("sessionId is required.");
         console.log(`[QwenDaemonClient] connectEvents: GET /session/${sessionId}/events`);
-        const response = await fetch(`${this.baseUrl}/session/${encodeURIComponent(sessionId)}/events`, {
-            headers: { Accept: "text/event-stream" },
-            signal
-        });
+        const response = await fetch(`${this.baseUrl}/session/${encodeURIComponent(sessionId)}/events`, { headers: { Accept: "text/event-stream" }, signal });
         if (!response.ok) {
             const text = await response.text();
             throw new Error(`Qwen daemon SSE HTTP ${response.status} ${response.statusText}: ${text}`);
         }
         if (!response.body) throw new Error("Qwen daemon SSE response has no body.");
-
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
         let buffer = "";
         let currentEvent = { id: null, event: "message", data: [] };
-
         if (onConnected) await onConnected();
         console.log(`[QwenDaemonClient] connectEvents: SSE connected for sessionId=${sessionId}`);
 
@@ -208,10 +202,7 @@ export class QwenDaemonClient {
         };
 
         const processLine = async line => {
-            if (line === "") {
-                await dispatch();
-                return;
-            }
+            if (line === "") { await dispatch(); return; }
             if (line.startsWith(":")) return;
             const separator = line.indexOf(":");
             const field = separator === -1 ? line : line.slice(0, separator);
@@ -244,18 +235,19 @@ export class QwenDaemonClient {
     isContextLimitError(error) {
         if (!error) return false;
         if (error instanceof QwenContextLimitError || error?.code === "QWEN_CONTEXT_LIMIT") return true;
-        const text = [
-            error?.message,
-            error?.details?.message,
-            error?.details?.data?.message,
-            error?.details?.error?.message,
-            error?.reason
-        ].filter(value => typeof value === "string").join("\n");
+        const text = [error?.message, error?.details?.message, error?.details?.data?.message, error?.details?.error?.message, error?.reason].filter(value => typeof value === "string").join("\n");
         return /context is too large|prompt tokens.*hard limit|compression_failed_empty_summary|context.{0,40}(?:limit|overflow)|(?:context|prompt).{0,60}too large/i.test(text);
     }
 
-    createContextLimitError(message, details = null) {
-        return new QwenContextLimitError(message, details);
+    isForwardFailure(error) {
+        if (!error) return false;
+        if (error instanceof QwenForwardError || error?.code === "QWEN_FORWARD_FAILED") return true;
+        const text = [error?.message, error?.details?.message, error?.details?.data?.message, error?.details?.data?.reason, error?.reason].filter(value => typeof value === "string").join("\n");
+        return /forward_failed|forward failed|agent channel closed|channel closed mid-request/i.test(text);
+    }
+
+    isRecoverableError(error) {
+        return this.isContextLimitError(error) || this.isForwardFailure(error);
     }
 
     async collectTurn(sessionId, prompt, { timeoutMs = this.timeoutMs } = {}) {
@@ -273,37 +265,13 @@ export class QwenDaemonClient {
         let stopReason = null;
         let contextLimitDetected = false;
         const recentEvents = [];
-        const stats = {
-            totalEvents: 0,
-            sessionUpdates: 0,
-            agentMessageChunks: 0,
-            agentMessageChars: 0,
-            toolCallEvents: 0,
-            toolCallUpdateEvents: 0,
-            permissionRequests: 0,
-            usageUpdates: 0,
-            turnComplete: 0,
-            turnErrors: 0,
-            promptCancelled: 0,
-            contextSafetyTriggered: 0,
-            firstEventAt: null,
-            lastEventAt: null
-        };
-        const turnPromise = new Promise((resolve, reject) => {
-            resolveTurn = resolve;
-            rejectTurn = reject;
-        });
+        const stats = { totalEvents: 0, sessionUpdates: 0, agentMessageChunks: 0, agentMessageChars: 0, toolCallEvents: 0, toolCallUpdateEvents: 0, permissionRequests: 0, usageUpdates: 0, turnComplete: 0, turnErrors: 0, promptCancelled: 0, contextSafetyTriggered: 0, forwardFailures: 0, firstEventAt: null, lastEventAt: null };
+        const turnPromise = new Promise((resolve, reject) => { resolveTurn = resolve; rejectTurn = reject; });
         const startedAt = Date.now();
 
         const rememberEvent = event => {
             const update = event.parsed?.data?.update ?? event.parsed?.update ?? event.parsed;
-            recentEvents.push({
-                id: event.id,
-                event: event.event,
-                logical: update?.sessionUpdate ?? event.parsed?.sessionUpdate ?? null,
-                promptId: event.parsed?.promptId ?? null,
-                text: typeof update?.content?.text === "string" ? update.content.text.slice(0, 120) : null
-            });
+            recentEvents.push({ id: event.id, event: event.event, logical: update?.sessionUpdate ?? event.parsed?.sessionUpdate ?? null, promptId: event.parsed?.promptId ?? null, text: typeof update?.content?.text === "string" ? update.content.text.slice(0, 120) : null });
             while (recentEvents.length > this.diagnosticRingSize) recentEvents.shift();
         };
 
@@ -320,36 +288,13 @@ export class QwenDaemonClient {
             const contextSize = update?.size ?? payload?.size ?? payload?.data?.size ?? usage?.contextSize ?? null;
             const contextUsed = update?.used ?? payload?.used ?? payload?.data?.used ?? usage?.contextUsed ?? null;
             if (!eventUsage && !meta?.durationMs && contextSize === null && contextUsed === null) return;
-
-            usage = {
-                inputTokens: eventUsage?.inputTokens ?? usage?.inputTokens ?? null,
-                outputTokens: eventUsage?.outputTokens ?? usage?.outputTokens ?? null,
-                totalTokens: eventUsage?.totalTokens ?? usage?.totalTokens ?? null,
-                thoughtTokens: eventUsage?.thoughtTokens ?? usage?.thoughtTokens ?? null,
-                cachedReadTokens: eventUsage?.cachedReadTokens ?? usage?.cachedReadTokens ?? null,
-                durationMs: meta?.durationMs ?? usage?.durationMs ?? null,
-                contextSize,
-                contextUsed
-            };
-
-            if (
-                !contextLimitDetected &&
-                Number.isFinite(contextSize) &&
-                Number.isFinite(contextUsed) &&
-                contextUsed >= contextSize * this.contextSafetyRatio
-            ) {
+            usage = { inputTokens: eventUsage?.inputTokens ?? usage?.inputTokens ?? null, outputTokens: eventUsage?.outputTokens ?? usage?.outputTokens ?? null, totalTokens: eventUsage?.totalTokens ?? usage?.totalTokens ?? null, thoughtTokens: eventUsage?.thoughtTokens ?? usage?.thoughtTokens ?? null, cachedReadTokens: eventUsage?.cachedReadTokens ?? usage?.cachedReadTokens ?? null, durationMs: meta?.durationMs ?? usage?.durationMs ?? null, contextSize, contextUsed };
+            if (!contextLimitDetected && Number.isFinite(contextSize) && Number.isFinite(contextUsed) && contextUsed >= contextSize * this.contextSafetyRatio) {
                 contextLimitDetected = true;
                 stats.contextSafetyTriggered += 1;
                 console.warn(`[QwenDaemonClient] context safety threshold reached: used=${contextUsed}, size=${contextSize}, ratio=${(contextUsed / contextSize).toFixed(3)}`);
-                void this.cancelActivePrompt(sessionId).catch(cancelError => {
-                    console.warn(`[QwenDaemonClient] context safety cancel failed: ${cancelError.message}`);
-                });
-                finishWithError(
-                    `Qwen context usage reached the safety threshold (${contextUsed}/${contextSize}).`,
-                    "context_safety_limit",
-                    { contextSize, contextUsed },
-                    (message, details) => this.createContextLimitError(message, details)
-                );
+                void this.cancelActivePrompt(sessionId).catch(cancelError => console.warn(`[QwenDaemonClient] context safety cancel failed: ${cancelError.message}`));
+                finishWithError(`Qwen context usage reached the safety threshold (${contextUsed}/${contextSize}).`, "context_safety_limit", { contextSize, contextUsed }, (message, details) => new QwenContextLimitError(message, details));
             }
         };
 
@@ -359,34 +304,20 @@ export class QwenDaemonClient {
             stats.firstEventAt ??= now;
             stats.lastEventAt = now;
             rememberEvent(event);
-
             const payload = event.parsed;
             if (!payload) return;
             const update = payload.data?.update ?? payload.update ?? payload;
             const sessionUpdate = update?.sessionUpdate ?? payload.sessionUpdate ?? null;
-
             if (event.event === "session_update") stats.sessionUpdates += 1;
-
             if (sessionUpdate === "agent_message_chunk") {
                 stats.agentMessageChunks += 1;
                 const text = update?.content?.text ?? payload.content?.text;
-                if (typeof text === "string") {
-                    chunks.push(text);
-                    stats.agentMessageChars += text.length;
-                }
+                if (typeof text === "string") { chunks.push(text); stats.agentMessageChars += text.length; }
                 updateUsage(payload, update);
-            } else if (sessionUpdate === "tool_call") {
-                stats.toolCallEvents += 1;
-            } else if (sessionUpdate === "tool_call_update") {
-                stats.toolCallUpdateEvents += 1;
-            } else if (sessionUpdate === "usage_update") {
-                stats.usageUpdates += 1;
-                updateUsage(payload, update);
-            } else if (sessionUpdate === "permission_request" || event.event === "permission_request") {
-                stats.permissionRequests += 1;
-                await this.handlePermissionRequest(payload);
-            }
-
+            } else if (sessionUpdate === "tool_call") stats.toolCallEvents += 1;
+            else if (sessionUpdate === "tool_call_update") stats.toolCallUpdateEvents += 1;
+            else if (sessionUpdate === "usage_update") { stats.usageUpdates += 1; updateUsage(payload, update); }
+            else if (sessionUpdate === "permission_request" || event.event === "permission_request") { stats.permissionRequests += 1; await this.handlePermissionRequest(payload); }
             promptId = payload.promptId ?? update?.promptId ?? promptId;
 
             if (event.event === "turn_complete" || sessionUpdate === "turn_complete") {
@@ -402,15 +333,13 @@ export class QwenDaemonClient {
                 stats.promptCancelled += 1;
                 const reason = payload.reason ?? payload.data?.reason ?? "unknown";
                 const message = payload.message ?? payload.data?.message ?? "";
-                if (contextLimitDetected || this.isContextLimitError(message) || this.isContextLimitError(payload)) {
-                    finishWithError(
-                        `Qwen prompt cancelled after context limit detection: ${reason}${message ? `: ${message}` : ""}`,
-                        event.event === "session_update" ? sessionUpdate : event.event,
-                        payload,
-                        (errorMessage, details) => this.createContextLimitError(errorMessage, details)
-                    );
+                if (reason === "forward_failed" || /forward[_ ]failed/i.test(reason) || this.isForwardFailure(payload) || this.isForwardFailure(message)) {
+                    stats.forwardFailures += 1;
+                    finishWithError(`Qwen prompt cancelled: reason=${reason}${message ? `: ${message}` : ""}`, event.event === "session_update" ? sessionUpdate : event.event, payload, (errorMessage, details) => new QwenForwardError(errorMessage, details));
+                } else if (contextLimitDetected || this.isContextLimitError(message) || this.isContextLimitError(payload)) {
+                    finishWithError(`Qwen prompt cancelled after context limit detection: ${reason}${message ? `: ${message}` : ""}`, event.event === "session_update" ? sessionUpdate : event.event, payload, (errorMessage, details) => new QwenContextLimitError(errorMessage, details));
                 } else {
-                    finishWithError(`Qwen prompt cancelled${message ? `: ${message}` : "."}`, event.event === "session_update" ? sessionUpdate : event.event, payload);
+                    finishWithError(`Qwen prompt cancelled: reason=${reason}${message ? `: ${message}` : ""}`, event.event === "session_update" ? sessionUpdate : event.event, payload);
                 }
                 return;
             }
@@ -419,27 +348,19 @@ export class QwenDaemonClient {
                 stats.turnErrors += 1;
                 const detail = payload.message ?? payload.error?.message ?? payload.data?.message ?? update?.message ?? JSON.stringify(payload);
                 if (this.isContextLimitError(payload) || this.isContextLimitError(detail)) {
-                    finishWithError(
-                        `Qwen context limit error: ${detail}`,
-                        event.event === "session_update" ? sessionUpdate : event.event,
-                        payload,
-                        (errorMessage, details) => this.createContextLimitError(errorMessage, details)
-                    );
+                    finishWithError(`Qwen context limit error: ${detail}`, event.event === "session_update" ? sessionUpdate : event.event, payload, (errorMessage, details) => new QwenContextLimitError(errorMessage, details));
+                } else if (this.isForwardFailure(payload) || this.isForwardFailure(detail)) {
+                    stats.forwardFailures += 1;
+                    finishWithError(`Qwen forward failure: ${detail}`, event.event === "session_update" ? sessionUpdate : event.event, payload, (errorMessage, details) => new QwenForwardError(errorMessage, details));
                 } else {
                     finishWithError(`Qwen turn error: ${detail}`, event.event === "session_update" ? sessionUpdate : event.event, payload);
                 }
             }
-        }, { signal: controller.signal, onConnected: () => { connected = true; } }).catch(error => {
-            streamError = error;
-            rejectTurn(error);
-        });
+        }, { signal: controller.signal, onConnected: () => { connected = true; } }).catch(error => { streamError = error; rejectTurn(error); });
 
         timeoutHandle = setTimeout(async () => {
-            try {
-                await this.cancelActivePrompt(sessionId);
-            } catch (cancelError) {
-                streamError = new Error(`Qwen daemon turn timed out and cancel failed: ${cancelError.message}`);
-            }
+            try { await this.cancelActivePrompt(sessionId); }
+            catch (cancelError) { streamError = new Error(`Qwen daemon turn timed out and cancel failed: ${cancelError.message}`); }
             rejectTurn(streamError ?? new Error(`Qwen daemon turn timed out after ${timeoutMs} ms.`));
         }, timeoutMs);
 
@@ -452,24 +373,16 @@ export class QwenDaemonClient {
             promptId = promptResult?.promptId ?? promptId;
             await turnPromise;
             if (streamError) throw streamError;
-            if (terminalEvent !== "turn_complete" && stats.turnComplete === 0) {
-                throw new Error("Qwen turn ended without turn_complete.");
-            }
-
+            if (terminalEvent !== "turn_complete" && stats.turnComplete === 0) throw new Error("Qwen turn ended without turn_complete.");
             const elapsedMs = Math.max(0, (stats.lastEventAt ?? Date.now()) - (stats.firstEventAt ?? startedAt));
             const chunksPerSecond = elapsedMs > 0 ? Number((stats.agentMessageChunks / (elapsedMs / 1000)).toFixed(2)) : null;
-            console.log(`[QwenDaemonClient] diagnostics: events=${stats.totalEvents}, sessionUpdates=${stats.sessionUpdates}, agentChunks=${stats.agentMessageChunks}, responseChars=${stats.agentMessageChars}, toolCalls=${stats.toolCallEvents}, toolCallUpdates=${stats.toolCallUpdateEvents}, permissions=${stats.permissionRequests}, usageUpdates=${stats.usageUpdates}, turnComplete=${stats.turnComplete}, contextSafetyTriggered=${stats.contextSafetyTriggered}, durationMs=${elapsedMs}, chunksPerSecond=${chunksPerSecond ?? "(n/a)"}`);
+            console.log(`[QwenDaemonClient] diagnostics: events=${stats.totalEvents}, sessionUpdates=${stats.sessionUpdates}, agentChunks=${stats.agentMessageChunks}, responseChars=${stats.agentMessageChars}, toolCalls=${stats.toolCallEvents}, toolCallUpdates=${stats.toolCallUpdateEvents}, permissions=${stats.permissionRequests}, usageUpdates=${stats.usageUpdates}, turnComplete=${stats.turnComplete}, contextSafetyTriggered=${stats.contextSafetyTriggered}, forwardFailures=${stats.forwardFailures}, durationMs=${elapsedMs}, chunksPerSecond=${chunksPerSecond ?? "(n/a)"}`);
             return { response: chunks.join(""), promptId, stopReason, usage, turnComplete: stats.turnComplete > 0, diagnostics: stats };
         } catch (error) {
             const elapsedMs = Math.max(0, Date.now() - startedAt);
-            console.error(`[QwenDaemonClient] diagnostics before failure: events=${stats.totalEvents}, sessionUpdates=${stats.sessionUpdates}, agentChunks=${stats.agentMessageChunks}, responseChars=${stats.agentMessageChars}, toolCalls=${stats.toolCallEvents}, toolCallUpdates=${stats.toolCallUpdateEvents}, permissions=${stats.permissionRequests}, usageUpdates=${stats.usageUpdates}, turnComplete=${stats.turnComplete}, turnErrors=${stats.turnErrors}, promptCancelled=${stats.promptCancelled}, contextSafetyTriggered=${stats.contextSafetyTriggered}, elapsedMs=${elapsedMs}`);
-            if (terminalEvent) {
-                console.error(`[QwenDaemonClient] terminal event: ${terminalEvent}`);
-                console.error(`[QwenDaemonClient] terminal payload: ${JSON.stringify(terminalPayload, null, 2)}`);
-            }
-            if (recentEvents.length > 0) {
-                console.error(`[QwenDaemonClient] recent events: ${JSON.stringify(recentEvents, null, 2)}`);
-            }
+            console.error(`[QwenDaemonClient] diagnostics before failure: events=${stats.totalEvents}, sessionUpdates=${stats.sessionUpdates}, agentChunks=${stats.agentMessageChunks}, responseChars=${stats.agentMessageChars}, toolCalls=${stats.toolCallEvents}, toolCallUpdates=${stats.toolCallUpdateEvents}, permissions=${stats.permissionRequests}, usageUpdates=${stats.usageUpdates}, turnComplete=${stats.turnComplete}, turnErrors=${stats.turnErrors}, promptCancelled=${stats.promptCancelled}, contextSafetyTriggered=${stats.contextSafetyTriggered}, forwardFailures=${stats.forwardFailures}, elapsedMs=${elapsedMs}`);
+            if (terminalEvent) console.error(`[QwenDaemonClient] terminal event: ${terminalEvent}`), console.error(`[QwenDaemonClient] terminal payload: ${JSON.stringify(terminalPayload, null, 2)}`);
+            if (recentEvents.length > 0) console.error(`[QwenDaemonClient] recent events: ${JSON.stringify(recentEvents, null, 2)}`);
             if (streamError) throw streamError;
             throw error;
         } finally {
@@ -481,30 +394,24 @@ export class QwenDaemonClient {
 
     async run(prompt) {
         if (typeof prompt !== "string" || !prompt) throw new Error("prompt must be a non-empty string.");
-
         let lastError = null;
-        for (let attempt = 0; attempt <= this.maxContextRetries; attempt++) {
-            if (attempt > 0) {
-                console.warn(`[QwenDaemonClient] context recovery: starting fresh session (retry ${attempt}/${this.maxContextRetries})`);
-            }
-
+        for (let attempt = 0; attempt <= this.maxRecoveryRetries; attempt++) {
+            if (attempt > 0) console.warn(`[QwenDaemonClient] recovery: starting fresh session (retry ${attempt}/${this.maxRecoveryRetries}, reason=${lastError?.code ?? "unknown"})`);
             console.log("[QwenDaemonClient] run: creating session");
             const session = await this.createSession();
-
             try {
                 console.log(`[QwenDaemonClient] run: collecting turn for sessionId=${session.sessionId}`);
                 return await this.collectTurn(session.sessionId, prompt);
             } catch (error) {
                 lastError = error;
-                if (!this.isContextLimitError(error)) throw error;
-                if (attempt >= this.maxContextRetries) {
-                    console.error("[QwenDaemonClient] context recovery exhausted.");
+                if (!this.isRecoverableError(error)) throw error;
+                if (attempt >= this.maxRecoveryRetries) {
+                    console.error(`[QwenDaemonClient] recovery exhausted for code=${error.code ?? "unknown"}`);
                     throw error;
                 }
-                console.warn(`[QwenDaemonClient] context limit detected; discarding sessionId=${session.sessionId} and retrying with a fresh session.`);
+                console.warn(`[QwenDaemonClient] recoverable failure detected: code=${error.code ?? "unknown"}; discarding sessionId=${session.sessionId} and retrying with a fresh session.`);
             }
         }
-
         throw lastError ?? new Error("Qwen run failed without an error.");
     }
 }
