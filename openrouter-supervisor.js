@@ -2,17 +2,20 @@ import https from "https";
 import { spawn } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { readFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
+import os from "node:os";
 import QwenDaemonClient from "./qwen-daemon-client.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const PROJECT_ROOT = "E:\\tools\\AI\\project\\PromptDictionary";
-const QWEN_DAEMON_URL = "http://127.0.0.1:4170";
+const QWEN_DAEMON_URL = "http://127.0.0.1:4171";
+const QWEN_DAEMON_PORT = 4171;
 const QWEN_COMMAND = process.env.QWEN_COMMAND || "qwen";
 const QWEN_DAEMON_TIMEOUT_MS = 60 * 60 * 1000;
 const QWEN_DAEMON_START_TIMEOUT_MS = 60000;
 const QWEN_DAEMON_POLL_INTERVAL_MS = 1000;
+const QWEN_SUPERVISOR_SETTINGS_FILE = path.join(os.tmpdir(), "qwen-supervisor-settings.json");
 const PROMPT_DIR = path.join(__dirname, "prompts");
 const SUPERVISOR_PROMPT_FILE = path.join(PROMPT_DIR, "openrouter-supervisor.txt");
 const TASK_FILE = path.join(PROMPT_DIR, "task.txt");
@@ -64,30 +67,49 @@ function isInvestigationTask(task) {
     return /調査の完了条件|grep_searchだけでは完了|今回の調査対象|調査Task/i.test(task);
 }
 
+async function prepareSupervisorQwenSettings() {
+    const settings = {
+        memory: {
+            enableManagedAutoMemory: false,
+            enableManagedAutoDream: false,
+            enableAutoSkill: false
+        }
+    };
+    await writeFile(QWEN_SUPERVISOR_SETTINGS_FILE, `${JSON.stringify(settings, null, 2)}\n`, "utf8");
+    console.log(`Supervisor Qwen settings: ${QWEN_SUPERVISOR_SETTINGS_FILE}`);
+    console.log("Supervisor Qwen memory: managed auto-memory OFF, auto-dream OFF, auto-skill OFF");
+}
+
 async function ensureQwenDaemon() {
     console.log("\n===== Qwen Daemon =====");
     try {
         const capabilities = await qwenClient.capabilities();
         if (capabilities?.mode === "http-bridge") {
-            console.log(`Qwen daemon already running at ${QWEN_DAEMON_URL}`);
+            console.log(`Supervisor Qwen daemon already running at ${QWEN_DAEMON_URL}`);
             return;
         }
-        console.log("Qwen daemon responded, but mode is not http-bridge. Attempting to start HTTP bridge.");
+        console.log("Qwen daemon responded, but mode is not http-bridge. Attempting to start dedicated Supervisor daemon.");
     } catch {
-        console.log("Qwen daemon is not available. Starting qwen serve --http-bridge...");
+        console.log(`Supervisor Qwen daemon is not available. Starting dedicated qwen serve --http-bridge --port ${QWEN_DAEMON_PORT}...`);
     }
 
+    await prepareSupervisorQwenSettings();
+
     try {
-        const child = spawn(QWEN_COMMAND, ["serve", "--http-bridge"], {
+        const child = spawn(QWEN_COMMAND, ["serve", "--http-bridge", "--port", String(QWEN_DAEMON_PORT)], {
             cwd: __dirname,
             detached: true,
             windowsHide: true,
             shell: true,
-            stdio: "ignore"
+            stdio: "ignore",
+            env: {
+                ...process.env,
+                QWEN_CODE_SYSTEM_SETTINGS_PATH: QWEN_SUPERVISOR_SETTINGS_FILE
+            }
         });
         child.unref();
     } catch (error) {
-        throw new Error(`Failed to start qwen serve --http-bridge: ${error.message}`);
+        throw new Error(`Failed to start dedicated Supervisor qwen serve --http-bridge: ${error.message}`);
     }
 
     const deadline = Date.now() + QWEN_DAEMON_START_TIMEOUT_MS;
@@ -96,7 +118,7 @@ async function ensureQwenDaemon() {
             const health = await qwenClient.health();
             const capabilities = await qwenClient.capabilities();
             if (health?.status === "ok" && capabilities?.mode === "http-bridge") {
-                console.log("Qwen daemon is ready.");
+                console.log(`Supervisor Qwen daemon is ready at ${QWEN_DAEMON_URL}.`);
                 return;
             }
         } catch {
@@ -104,7 +126,7 @@ async function ensureQwenDaemon() {
         }
         await new Promise(resolve => setTimeout(resolve, QWEN_DAEMON_POLL_INTERVAL_MS));
     }
-    throw new Error(`Qwen daemon did not become ready within ${QWEN_DAEMON_START_TIMEOUT_MS} ms.`);
+    throw new Error(`Supervisor Qwen daemon did not become ready within ${QWEN_DAEMON_START_TIMEOUT_MS} ms.`);
 }
 
 async function runCommand(command, args) {
