@@ -23,6 +23,8 @@ const MAX_BUILD_RESULT_CHARS = 12000;
 const MAX_GIT_RESULT_CHARS = 8000;
 const OPENROUTER_MAX_RETRIES = 3;
 const OPENROUTER_RETRY_DELAY_MS = 3000;
+const MAX_STAGE_RESULT_CHARS = 5000;
+const INVESTIGATION_STAGE_COUNT = 4;
 const apiKey = process.env.OPENROUTER_API_KEY;
 
 if (!apiKey) {
@@ -56,6 +58,10 @@ function limitText(text, maxChars) {
     if (!text) return "";
     if (text.length <= maxChars) return text;
     return [text.slice(0, maxChars), "", `[TRUNCATED: original ${text.length} chars]`].join("\n");
+}
+
+function isInvestigationTask(task) {
+    return /調査の完了条件|grep_searchだけでは完了|今回の調査対象|調査Task/i.test(task);
 }
 
 async function ensureQwenDaemon() {
@@ -115,8 +121,8 @@ async function runCommand(command, args) {
     });
 }
 
-async function runQwen(prompt) {
-    console.log("\n===== Qwen HTTP Bridge =====\n");
+async function runQwen(prompt, label = "Qwen") {
+    console.log(`\n===== ${label} =====\n`);
     try {
         const result = await qwenClient.run(prompt);
         console.log(`Qwen stopReason: ${result.stopReason ?? "(none)"}`);
@@ -131,6 +137,142 @@ async function runQwen(prompt) {
         console.error(error.message);
         throw error;
     }
+}
+
+async function runInvestigationQwen(task, basePrompt) {
+    const stagePrompts = [
+        [
+            "これは調査TaskのStage 1/4です。",
+            "今回の目的は、対象コードを一度に全部読むことではなく、担当範囲だけを確実に実ファイル確認することです。",
+            "",
+            "対象:",
+            "- E:\\tools\\AI\\MCP\\openrouter-supervisor.js",
+            "",
+            "必須確認:",
+            "1. runQwen() の実装",
+            "2. runCommand() の実装",
+            "3. Qwenプロセス/daemonの起動方法",
+            "4. Qwenへの入力方法",
+            "5. stdout/stderr取得方法",
+            "",
+            "必ずgrep_searchで位置を特定した後、read_fileで実コードを確認してください。",
+            "read_fileは1回150行以下、明示的な行範囲を使用してください。",
+            "最終回答ではコード全文を再掲せず、確認した事実を日本語で報告してください。",
+            "コード変更禁止。Build禁止。",
+            "",
+            "===== Base Task =====",
+            task,
+            "",
+            "===== Original Supervisor Prompt =====",
+            basePrompt
+        ].join("\n"),
+        [
+            "これは調査TaskのStage 2/4です。",
+            "Stage 1とは独立した新規Sessionです。前Stageの会話履歴には依存しません。",
+            "",
+            "対象:",
+            "- E:\\tools\\AI\\MCP\\openrouter-supervisor.js",
+            "",
+            "必須確認:",
+            "1. main() のIterationループ",
+            "2. Qwenプロセス終了条件",
+            "3. tempファイル生成・削除",
+            "4. Iteration間でQwenが再起動される箇所",
+            "5. MAX_ITERATIONSの処理",
+            "",
+            "grep_searchだけで完了扱いにせず、read_fileで実コードを確認してください。",
+            "特にmain()のループとPASS/FIX/FAILEDの終了経路を実コードで確認してください。",
+            "read_fileは1回150行以下、明示的な行範囲を使用してください。",
+            "コード変更禁止。Build禁止。",
+            "",
+            "===== Base Task =====",
+            task
+        ].join("\n"),
+        [
+            "これは調査TaskのStage 3/4です。",
+            "前Stageとは独立した新規Sessionです。",
+            "",
+            "必須確認:",
+            "1. prompts/openrouter-supervisor.txt の実内容を必要範囲だけread_fileで確認",
+            "2. prompts/task.txt の実内容を必要範囲だけread_fileで確認",
+            "3. Taskの禁止事項とSupervisorのPASS/FIX条件の関係",
+            "4. 今回の調査TaskでQwenがどこまで調査すれば完了なのか",
+            "",
+            "そのうえで、Stage 1/2の確認結果を次の参照情報として扱ってください。",
+            "===== Stage 1 Result =====",
+            limitText("{{STAGE1}}", MAX_STAGE_RESULT_CHARS),
+            "",
+            "===== Stage 2 Result =====",
+            limitText("{{STAGE2}}", MAX_STAGE_RESULT_CHARS),
+            "",
+            "Stage 3では実ファイル確認を優先し、推測は禁止します。",
+            "コード変更禁止。Build禁止。",
+            "",
+            "===== Base Task =====",
+            task
+        ].join("\n"),
+        [
+            "これは調査TaskのStage 4/4です。",
+            "このStageでは新しい大規模なツール調査を行わず、前3 Stageの確認結果を統合して最終報告を作成してください。",
+            "",
+            "最終報告には必ず以下を含めてください。",
+            "A. 10項目の確認事実",
+            "B. A/B比較8項目",
+            "C. 今回のQwen実行方式に関する結論",
+            "D. 未確認事項があれば明示",
+            "",
+            "===== Stage 1 Result =====",
+            "{{STAGE1}}",
+            "",
+            "===== Stage 2 Result =====",
+            "{{STAGE2}}",
+            "",
+            "===== Stage 3 Result =====",
+            "{{STAGE3}}",
+            "",
+            "推測で不足部分を埋めないでください。",
+            "確認できない項目は『未確認』と明記してください。",
+            "日本語で回答してください。"
+        ].join("\n")
+    ];
+
+    const stageResults = [];
+    for (let index = 0; index < INVESTIGATION_STAGE_COUNT; index++) {
+        const stageNumber = index + 1;
+        let prompt = stagePrompts[index];
+        if (stageNumber === 3) {
+            prompt = prompt.replace("{{STAGE1}}", limitText(stageResults[0] ?? "", MAX_STAGE_RESULT_CHARS));
+            prompt = prompt.replace("{{STAGE2}}", limitText(stageResults[1] ?? "", MAX_STAGE_RESULT_CHARS));
+        }
+        if (stageNumber === 4) {
+            prompt = prompt
+                .replace("{{STAGE1}}", limitText(stageResults[0] ?? "", MAX_STAGE_RESULT_CHARS))
+                .replace("{{STAGE2}}", limitText(stageResults[1] ?? "", MAX_STAGE_RESULT_CHARS))
+                .replace("{{STAGE3}}", limitText(stageResults[2] ?? "", MAX_STAGE_RESULT_CHARS));
+        }
+
+        console.log(`\n===== Investigation Stage ${stageNumber}/${INVESTIGATION_STAGE_COUNT} =====`);
+        try {
+            const result = await runQwen(prompt, `Qwen Investigation Stage ${stageNumber}/${INVESTIGATION_STAGE_COUNT}`);
+            stageResults.push(result);
+        } catch (error) {
+            throw new Error(`Investigation Stage ${stageNumber}/${INVESTIGATION_STAGE_COUNT} failed: ${error.message}`);
+        }
+    }
+
+    return [
+        "===== Qwen Investigation Stage 1 =====",
+        limitText(stageResults[0], MAX_STAGE_RESULT_CHARS),
+        "",
+        "===== Qwen Investigation Stage 2 =====",
+        limitText(stageResults[1], MAX_STAGE_RESULT_CHARS),
+        "",
+        "===== Qwen Investigation Stage 3 =====",
+        limitText(stageResults[2], MAX_STAGE_RESULT_CHARS),
+        "",
+        "===== Qwen Investigation Stage 4 Final =====",
+        limitText(stageResults[3], MAX_STAGE_RESULT_CHARS)
+    ].join("\n");
 }
 
 async function reviewWithOpenRouter(prompt) {
@@ -250,7 +392,7 @@ function parseSupervisorDecision(reviewText, buildRequired, buildExitCode, qwenR
         };
     }
 
-    const qwenFailed = typeof qwenResult === "string" && /Qwen (?:execution failed|prompt cancelled|turn error)|timed out/i.test(qwenResult);
+    const qwenFailed = typeof qwenResult === "string" && /Qwen (?:execution failed|prompt cancelled|turn error)|timed out|Investigation Stage .* failed/i.test(qwenResult);
     const qwenEmpty = !qwenResult || !qwenResult.trim();
     if ((qwenFailed || qwenEmpty) && parsed.decision === "PASS") {
         return {
@@ -327,7 +469,7 @@ function createFixQwenPrompt({ task, decision, buildText }) {
         "Taskでコード変更が禁止されている場合、ファイルを変更しないでください。",
         "TaskでBuildが禁止されている場合、Buildを実行しないでください。",
         "Taskに明示されていない変更・改善・リファクタリングを行わないでください。",
-        "作業完了後、実施内容と結果を日本語で報告してください."
+        "作業完了後、実施内容と結果を日本語で報告してください。"
     ].join("\n");
 }
 
@@ -348,7 +490,9 @@ async function main() {
         console.log("");
 
         const buildRequired = /^\s*BUILD_REQUIRED\s*:\s*true\s*$/im.test(task);
+        const investigationTask = isInvestigationTask(task);
         console.log(`BUILD_REQUIRED: ${buildRequired}`);
+        console.log(`INVESTIGATION_TASK: ${investigationTask}`);
 
         let qwenPrompt = [
             "以下のTaskを厳密に実行してください。",
@@ -393,7 +537,9 @@ async function main() {
 
             let qwenResult;
             try {
-                qwenResult = await runQwen(qwenPrompt);
+                qwenResult = investigationTask
+                    ? await runInvestigationQwen(task, qwenPrompt)
+                    : await runQwen(qwenPrompt);
             } catch (error) {
                 qwenResult = `Qwen execution failed:\n${error.message}`;
                 console.error(qwenResult);
@@ -455,6 +601,11 @@ async function main() {
     } catch (error) {
         console.error("\n===== Supervisor Error =====");
         console.error(error);
+        try {
+            await notifyFailure();
+        } catch {
+            // Keep the original Supervisor error as the primary failure.
+        }
         process.stdout.write("\x07");
         process.exitCode = 1;
     }
