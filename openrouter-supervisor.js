@@ -297,6 +297,10 @@ async function notifyCompletion() {
     await runCommand("powershell", ["-NoProfile", "-Command", "[console]::beep(600,200); [console]::beep(800,200)"]);
 }
 
+async function notifyFailure() {
+    await runCommand("powershell", ["-NoProfile", "-Command", "[console]::beep(400,250); [console]::beep(400,250); [console]::beep(300,500)"]);
+}
+
 function createFixQwenPrompt({ task, decision, buildText }) {
     const instructions = Array.isArray(decision.instructions) ? decision.instructions : [decision.summary ?? "問題を調査して修正してください。"];
     return [
@@ -439,6 +443,7 @@ async function main() {
                 console.error("========================================");
                 console.error(`最大試行回数 ${MAX_ITERATIONS} 回に到達しました。`);
                 console.error("人間による確認が必要です。");
+                await notifyFailure();
                 process.exitCode = 2;
                 return;
             }
