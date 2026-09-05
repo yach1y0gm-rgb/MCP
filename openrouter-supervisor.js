@@ -67,6 +67,19 @@ function isInvestigationTask(task) {
     return /調査の完了条件|grep_searchだけでは完了|今回の調査対象|調査Task/i.test(task);
 }
 
+function formatElapsedTime(milliseconds) {
+    const totalSeconds = Math.floor(Math.max(0, milliseconds) / 1000);
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = totalSeconds % 60;
+    return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+}
+
+function logTotalElapsedTime(startTime, label = "処理時間") {
+    const elapsed = Date.now() - startTime;
+    console.log(`${label}: ${formatElapsedTime(elapsed)} (${elapsed.toLocaleString()} ms)`);
+}
+
 async function prepareSupervisorQwenSettings() {
     const settings = {
         memory: {
@@ -422,10 +435,12 @@ function createFixQwenPrompt({ task, decision, buildText }) {
 }
 
 async function main() {
+    const supervisorStartTime = Date.now();
     try {
         console.log("========================================");
         console.log(" OpenRouter Supervisor");
         console.log("========================================\n");
+        console.log(`Supervisor開始時刻: ${new Date(supervisorStartTime).toLocaleString("ja-JP", { hour12: false })}`);
 
         await ensureQwenDaemon();
 
@@ -527,6 +542,7 @@ async function main() {
                 console.log("\n========================================");
                 console.log(" SUPERVISOR PASS");
                 console.log("========================================");
+                logTotalElapsedTime(supervisorStartTime);
                 await notifyCompletion();
                 return;
             }
@@ -537,6 +553,7 @@ async function main() {
                 console.error("========================================");
                 console.error(`最大試行回数 ${MAX_ITERATIONS} 回に到達しました。`);
                 console.error("人間による確認が必要です。");
+                logTotalElapsedTime(supervisorStartTime);
                 await notifyFailure();
                 process.exitCode = 2;
                 return;
@@ -549,6 +566,7 @@ async function main() {
     } catch (error) {
         console.error("\n===== Supervisor Error =====");
         console.error(error);
+        logTotalElapsedTime(supervisorStartTime, "エラー終了までの処理時間");
         try {
             await notifyFailure();
         } catch {
