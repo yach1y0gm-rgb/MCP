@@ -46,6 +46,29 @@ B. IterationごとにQwenを再起動する現方式
 - 1時間制限との両立
 - 異常終了時の復旧方法
 
+## 使用可能ツールの絶対制限
+
+このTaskでは、以下の2種類のツールだけを使用してください。
+
+- grep_search
+- read_file
+
+上記以外のツールは絶対に使用禁止です。
+
+特に以下は禁止します。
+
+- run_shell_command / shell / terminal
+- tool_search
+- MCPツール
+- subagent / agent
+- ask_user_question
+- ファイル書き込み・編集・削除系ツール
+- その他の未指定ツール
+
+Permission requestが発生するようなツールを使用してはいけません。
+
+使用可能なツールが見つからない場合や、指定ツールだけでは確認できない項目がある場合は、推測せず「未確認」と報告してください。
+
 ## ツール使用ルール
 
 巨大なtool resultを発生させないでください。
