@@ -26,7 +26,7 @@ const MAX_BUILD_RESULT_CHARS = 12000;
 const MAX_GIT_RESULT_CHARS = 8000;
 const OPENROUTER_MAX_RETRIES = 3;
 const OPENROUTER_RETRY_DELAY_MS = 3000;
-const MAX_STAGE_RESULT_CHARS = 5000;
+const MAX_STAGE_RESULT_CHARS = 3000;
 const INVESTIGATION_STAGE_COUNT = 4;
 const apiKey = process.env.OPENROUTER_API_KEY;
 
@@ -80,19 +80,27 @@ async function prepareSupervisorQwenSettings() {
     console.log("Supervisor Qwen memory: managed auto-memory OFF, auto-dream OFF, auto-skill OFF");
 }
 
+async function stopSupervisorQwenDaemon() {
+    try {
+        const result = await runCommand("powershell", [
+            "-NoProfile",
+            "-Command",
+            `$connections = Get-NetTCPConnection -LocalPort ${QWEN_DAEMON_PORT} -State Listen -ErrorAction SilentlyContinue; ` +
+            `if ($connections) { $connections | Select-Object -ExpandProperty OwningProcess -Unique | ForEach-Object { ` +
+            `if ($_ -and $_ -ne $PID) { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue } } }`
+        ]);
+        if (result.stderr?.trim()) {
+            console.log(`Existing Supervisor daemon stop warning: ${result.stderr.trim()}`);
+        }
+    } catch (error) {
+        console.log(`Existing Supervisor daemon cleanup warning: ${error.message}`);
+    }
+}
+
 async function ensureQwenDaemon() {
     console.log("\n===== Qwen Daemon =====");
-    try {
-        const capabilities = await qwenClient.capabilities();
-        if (capabilities?.mode === "http-bridge") {
-            console.log(`Supervisor Qwen daemon already running at ${QWEN_DAEMON_URL}`);
-            return;
-        }
-        console.log("Qwen daemon responded, but mode is not http-bridge. Attempting to start dedicated Supervisor daemon.");
-    } catch {
-        console.log(`Supervisor Qwen daemon is not available. Starting dedicated qwen serve --http-bridge --port ${QWEN_DAEMON_PORT}...`);
-    }
 
+    await stopSupervisorQwenDaemon();
     await prepareSupervisorQwenSettings();
 
     try {
@@ -161,100 +169,37 @@ async function runQwen(prompt, label = "Qwen") {
     }
 }
 
-async function runInvestigationQwen(task, basePrompt) {
+async function runInvestigationQwen(task) {
     const stagePrompts = [
         [
-            "これは調査TaskのStage 1/4です。",
-            "今回の目的は、対象コードを一度に全部読むことではなく、担当範囲だけを確実に実ファイル確認することです。",
-            "",
-            "対象:",
-            "- E:\\tools\\AI\\MCP\\openrouter-supervisor.js",
-            "",
-            "必須確認:",
-            "1. runQwen() の実装",
-            "2. runCommand() の実装",
-            "3. Qwenプロセス/daemonの起動方法",
-            "4. Qwenへの入力方法",
-            "5. stdout/stderr取得方法",
-            "",
-            "必ずgrep_searchで位置を特定した後、read_fileで実コードを確認してください。",
-            "read_fileは1回150行以下、明示的な行範囲を使用してください。",
-            "最終回答ではコード全文を再掲せず、確認した事実を日本語で報告してください。",
-            "コード変更禁止。Build禁止。",
-            "",
-            "===== Base Task =====",
-            task,
-            "",
-            "===== Original Supervisor Prompt =====",
-            basePrompt
+            "調査Task Stage 1/4。対象は E:\\tools\\AI\\MCP\\openrouter-supervisor.js のみ。",
+            "runQwen()、runCommand()、daemon起動方法、Qwen入力方法、stdout/stderr取得方法を確認する。",
+            "最初にgrep_searchで位置を特定し、その後read_fileで必ず実コードを確認する。",
+            "read_fileは明示的な行範囲、1回150行以下。コード変更禁止、Build禁止。",
+            "確認した事実だけを日本語で要約する。"
         ].join("\n"),
         [
-            "これは調査TaskのStage 2/4です。",
-            "Stage 1とは独立した新規Sessionです。前Stageの会話履歴には依存しません。",
-            "",
-            "対象:",
-            "- E:\\tools\\AI\\MCP\\openrouter-supervisor.js",
-            "",
-            "必須確認:",
-            "1. main() のIterationループ",
-            "2. Qwenプロセス終了条件",
-            "3. tempファイル生成・削除",
-            "4. Iteration間でQwenが再起動される箇所",
-            "5. MAX_ITERATIONSの処理",
-            "",
-            "grep_searchだけで完了扱いにせず、read_fileで実コードを確認してください。",
-            "特にmain()のループとPASS/FIX/FAILEDの終了経路を実コードで確認してください。",
-            "read_fileは1回150行以下、明示的な行範囲を使用してください。",
-            "コード変更禁止。Build禁止。",
-            "",
-            "===== Base Task =====",
-            task
+            "調査Task Stage 2/4。対象は E:\\tools\\AI\\MCP\\openrouter-supervisor.js のみ。",
+            "main()のIterationループ、Qwenプロセス終了条件、temp、Iteration間の再起動、MAX_ITERATIONSを確認する。",
+            "grep_searchで位置を特定した後、read_fileで必ず実コードを確認する。",
+            "read_fileは明示的な行範囲、1回150行以下。コード変更禁止、Build禁止。",
+            "確認した事実だけを日本語で要約する。"
         ].join("\n"),
         [
-            "これは調査TaskのStage 3/4です。",
-            "前Stageとは独立した新規Sessionです。",
-            "",
-            "必須確認:",
-            "1. prompts/openrouter-supervisor.txt の実内容を必要範囲だけread_fileで確認",
-            "2. prompts/task.txt の実内容を必要範囲だけread_fileで確認",
-            "3. Taskの禁止事項とSupervisorのPASS/FIX条件の関係",
-            "4. 今回の調査TaskでQwenがどこまで調査すれば完了なのか",
-            "",
-            "そのうえで、Stage 1/2の確認結果を次の参照情報として扱ってください。",
-            "===== Stage 1 Result =====",
-            limitText("{{STAGE1}}", MAX_STAGE_RESULT_CHARS),
-            "",
-            "===== Stage 2 Result =====",
-            limitText("{{STAGE2}}", MAX_STAGE_RESULT_CHARS),
-            "",
-            "Stage 3では実ファイル確認を優先し、推測は禁止します。",
-            "コード変更禁止。Build禁止。",
-            "",
-            "===== Base Task =====",
-            task
+            "調査Task Stage 3/4。promptファイルの実内容を確認する。",
+            "対象: E:\\tools\\AI\\MCP\\prompts\\openrouter-supervisor.txt と task.txt。",
+            "必要な範囲だけgrep_search/read_fileで確認し、Taskの禁止事項、PASS/FIX条件、完了条件を整理する。",
+            "既存Stageの結果は参照せず、ここではpromptファイルの実内容だけを確認する。",
+            "read_fileは明示的な行範囲、1回150行以下。コード変更禁止、Build禁止。",
+            "確認した事実だけを日本語で要約する。"
         ].join("\n"),
         [
-            "これは調査TaskのStage 4/4です。",
-            "このStageでは新しい大規模なツール調査を行わず、前3 Stageの確認結果を統合して最終報告を作成してください。",
-            "",
-            "最終報告には必ず以下を含めてください。",
-            "A. 10項目の確認事実",
-            "B. A/B比較8項目",
-            "C. 今回のQwen実行方式に関する結論",
-            "D. 未確認事項があれば明示",
-            "",
-            "===== Stage 1 Result =====",
-            "{{STAGE1}}",
-            "",
-            "===== Stage 2 Result =====",
-            "{{STAGE2}}",
-            "",
-            "===== Stage 3 Result =====",
-            "{{STAGE3}}",
-            "",
-            "推測で不足部分を埋めないでください。",
-            "確認できない項目は『未確認』と明記してください。",
-            "日本語で回答してください。"
+            "調査Task Stage 4/4。新しい大規模ツール調査は行わず、前3 Stageの結果を統合する。",
+            "最終報告には10項目の確認事実、A/B比較8項目、結論、未確認事項を含める。",
+            "Stage 1 Result:\n{{STAGE1}}",
+            "Stage 2 Result:\n{{STAGE2}}",
+            "Stage 3 Result:\n{{STAGE3}}",
+            "確認できない内容を推測で埋めず『未確認』と明記する。日本語で回答する。"
         ].join("\n")
     ];
 
@@ -262,39 +207,20 @@ async function runInvestigationQwen(task, basePrompt) {
     for (let index = 0; index < INVESTIGATION_STAGE_COUNT; index++) {
         const stageNumber = index + 1;
         let prompt = stagePrompts[index];
-        if (stageNumber === 3) {
-            prompt = prompt.replace("{{STAGE1}}", limitText(stageResults[0] ?? "", MAX_STAGE_RESULT_CHARS));
-            prompt = prompt.replace("{{STAGE2}}", limitText(stageResults[1] ?? "", MAX_STAGE_RESULT_CHARS));
-        }
         if (stageNumber === 4) {
             prompt = prompt
                 .replace("{{STAGE1}}", limitText(stageResults[0] ?? "", MAX_STAGE_RESULT_CHARS))
                 .replace("{{STAGE2}}", limitText(stageResults[1] ?? "", MAX_STAGE_RESULT_CHARS))
                 .replace("{{STAGE3}}", limitText(stageResults[2] ?? "", MAX_STAGE_RESULT_CHARS));
         }
-
         console.log(`\n===== Investigation Stage ${stageNumber}/${INVESTIGATION_STAGE_COUNT} =====`);
-        try {
-            const result = await runQwen(prompt, `Qwen Investigation Stage ${stageNumber}/${INVESTIGATION_STAGE_COUNT}`);
-            stageResults.push(result);
-        } catch (error) {
-            throw new Error(`Investigation Stage ${stageNumber}/${INVESTIGATION_STAGE_COUNT} failed: ${error.message}`);
-        }
+        const result = await runQwen(prompt, `Qwen Investigation Stage ${stageNumber}/${INVESTIGATION_STAGE_COUNT}`);
+        stageResults.push(result);
     }
 
-    return [
-        "===== Qwen Investigation Stage 1 =====",
-        limitText(stageResults[0], MAX_STAGE_RESULT_CHARS),
-        "",
-        "===== Qwen Investigation Stage 2 =====",
-        limitText(stageResults[1], MAX_STAGE_RESULT_CHARS),
-        "",
-        "===== Qwen Investigation Stage 3 =====",
-        limitText(stageResults[2], MAX_STAGE_RESULT_CHARS),
-        "",
-        "===== Qwen Investigation Stage 4 Final =====",
-        limitText(stageResults[3], MAX_STAGE_RESULT_CHARS)
-    ].join("\n");
+    return [1, 2, 3, 4].map(stage =>
+        `===== Qwen Investigation Stage ${stage} =====\n${limitText(stageResults[stage - 1], MAX_STAGE_RESULT_CHARS)}`
+    ).join("\n\n");
 }
 
 async function reviewWithOpenRouter(prompt) {
@@ -560,7 +486,7 @@ async function main() {
             let qwenResult;
             try {
                 qwenResult = investigationTask
-                    ? await runInvestigationQwen(task, qwenPrompt)
+                    ? await runInvestigationQwen(task)
                     : await runQwen(qwenPrompt);
             } catch (error) {
                 qwenResult = `Qwen execution failed:\n${error.message}`;
